@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from .models import Box, TilePlan
+from ..common.models import Box, TilePlan
 
 
 def _axis_starts(length: int, tile_length: int, overlap: int) -> list[int]:

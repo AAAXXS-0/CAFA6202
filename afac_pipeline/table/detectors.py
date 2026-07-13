@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from .config import TableConfig
-from .models import Box, DetectedBox
+from ..common.models import Box, DetectedBox
 
 
 class TableDetector(ABC):

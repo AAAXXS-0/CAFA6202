@@ -1,9 +1,9 @@
 import unittest
 
-from afac_pipeline.long_config import LongConfig
-from afac_pipeline.long_models import LayoutBlock
-from afac_pipeline.long_structure import infer_heading_hierarchy, is_centered
-from afac_pipeline.models import Box
+from afac_pipeline.long.config import LongConfig
+from afac_pipeline.long.models import LayoutBlock
+from afac_pipeline.long.structure import infer_heading_hierarchy, is_centered
+from afac_pipeline.common.models import Box
 
 
 class LongCenterRuleTest(unittest.TestCase):

@@ -4,9 +4,7 @@
 但检测、切块与聚合逻辑保持相互隔离。
 """
 
-from .config import TableConfig
-from .long_config import LongConfig
-from .long_pipeline import LongPipeline
-from .table_branch import TablePipeline
+from .long import LongConfig, LongPipeline
+from .table import TableConfig, TablePipeline
 
 __all__ = ["TableConfig", "TablePipeline", "LongConfig", "LongPipeline"]

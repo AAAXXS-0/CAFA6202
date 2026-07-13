@@ -1,8 +1,8 @@
 import unittest
 
-from afac_pipeline.long_models import SemanticPart, SemanticSegment
-from afac_pipeline.long_packing import build_recognition_packs
-from afac_pipeline.models import Box
+from afac_pipeline.long.models import SemanticPart, SemanticSegment
+from afac_pipeline.long.packing import build_recognition_packs
+from afac_pipeline.common.models import Box
 
 
 def segment(index: int, start: int, end: int) -> SemanticSegment:

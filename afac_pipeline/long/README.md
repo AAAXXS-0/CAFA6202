@@ -1,0 +1,108 @@
+# 长图分支说明
+
+长图分支严格使用赛题已经分好的长图目录，不做自动路由。整体流程如下：
+
+```text
+2048 高滑窗、1792 步长
+    → general6-8n 基础版面检测
+    → 全局坐标映射与 256 重叠区去重
+    → 多行逻辑 Title 合并
+    → 居中标题推断目录标题和正文 H1
+    → 连续 Title 组生成 H2/H3
+    → 按标题树二次语义切块
+    → 相邻小块打包为不超过 3900px 的 VLM 请求图
+    → FinixDoc-VL
+    → 相邻请求结果接缝去重与 Markdown 聚合
+```
+
+## 1. 配置
+
+配置示例为 `afac_pipeline/long/config.example.json`，关键参数为：
+
+- 检测模型：`360LayoutAnalysis/general6-8n.pt`；
+- 窗口高度：2048；
+- 窗口步长：1792；
+- 检测窗口重叠：256；
+- YOLO 输入尺寸：1280；
+- Title 最低置信度：0.20；
+- Text 最低置信度：0.25；
+- FinixDoc-VL 请求图最大高度：3900；
+- 超长语义段物理重叠：200。
+
+模型标签只使用 `Text、Title、Figure、Table、Equation、Caption`，标题推断不依赖不稳定的 Toc 标签。
+
+## 2. 准备长图
+
+```bash
+python main.py prepare-long \
+  --input-dir "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images" \
+  --work-dir work/long \
+  --config afac_pipeline/long/config.example.json
+```
+
+输出结构：
+
+```text
+work/long/
+├── cache.sqlite3
+├── dataset_manifest.json
+└── prepared/<文件名_哈希>/
+    ├── manifest.json
+    ├── detection_windows/
+    ├── semantic_crops/
+    │   ├── _document/front_matter/
+    │   ├── _document/toc/
+    │   └── h2_0000/h3_0000/
+    └── vlm_requests/
+```
+
+标题文字在小模型阶段未知，因此磁盘目录使用稳定 ID；FinixDoc-VL 返回标题文字后写入 Markdown，不用未经 OCR 清洗的标题文字重命名目录。
+
+`semantic_crops/` 保留按 H2/H3 组织的细粒度审计切块。`vlm_requests/` 将坐标连续的小块重新打包，以控制 API 调用量，同时保证每个请求图不超过 3900px 高。
+
+## 3. 标题规则
+
+1. 极近、尺寸和中心位置相似的 Title 先合并为多行逻辑标题。
+2. 正文前只有一个可信居中标题时，该标题为正文 H1。
+3. 正文前有两个或更多可信居中标题时，最后一个为正文 H1，前一个为目录标题，更早内容归入前置信息。
+4. 正文中连续且中间没有内容的 Title 组成标题组。
+5. 至少两个 Title 的标题组中，第一个为 H2，其余为 H3。
+6. 当前 H2 后的单个标题为 H3；如果全文没有可用 H2，第一个单标题降级为 H2。
+7. H2 后紧跟 H3 时，第一个 H3 裁片从 H2 顶部开始，保证父标题不会丢失。
+
+## 4. 当前 A 榜切块实测
+
+50 张输入中有 33 张 SHA-256 唯一图，17 张完全重复图直接复用结果。33 张唯一图共生成 1261 个检测窗口和 5193 个逻辑图片块：
+
+- 逻辑块高度：中位数 308px，P95 为 1102px，最大 3900px；
+- 3822 个逻辑块低于 512px，因此不适合逐块请求大模型；
+- 打包后为 644 个 VLM 请求图，平均每张唯一图 19.52 个；
+- 请求图高度中位数 3670px，P95 为 3878px，最大 3900px；
+- 0 个请求图超过 4096px，所有原图纵向覆盖缺口为 0。
+
+因此，5193 是可追踪标题层级的逻辑切块数，不是 API 调用数；实际预计调用约 644 次。
+
+## 5. 调用 FinixDoc-VL
+
+```bash
+export FINIXDOC_API_KEY="你的密钥"
+
+python main.py run-long \
+  --manifest work/long/dataset_manifest.json \
+  --work-dir work/long \
+  --api-url "主办方完整接口地址" \
+  --model "FinixDoc-VL" \
+  --output-csv outputs/long_submission.csv
+```
+
+切片响应和完整图片结果均写入 SQLite 缓存。中断后重跑不会重复请求已经成功的切片，完全重复图片也直接复用完整 Markdown。
+
+## 6. 校验与调试
+
+```bash
+python afac_pipeline/long/tools/validate_prepared.py --manifest work/long/dataset_manifest.json
+python afac_pipeline/long/tools/estimate_requests.py --manifest work/long/dataset_manifest.json
+python -m unittest discover -s tests -v
+```
+
+校验脚本检查原图纵向覆盖、切片尺寸、标签分布、标题角色以及每张图的窗口/切片数量。

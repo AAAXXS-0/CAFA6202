@@ -1,14 +1,14 @@
 import unittest
 
-from afac_pipeline.long_config import LongConfig
-from afac_pipeline.long_models import LayoutBlock
-from afac_pipeline.long_structure import (
+from afac_pipeline.long.config import LongConfig
+from afac_pipeline.long.models import LayoutBlock
+from afac_pipeline.long.structure import (
     attach_physical_parts,
     build_semantic_segments,
     infer_heading_hierarchy,
     merge_multiline_titles,
 )
-from afac_pipeline.models import Box
+from afac_pipeline.common.models import Box
 
 
 def block(identifier: str, label: str, y1: int, y2: int, x1: int = 80, x2: int = 520):
@@ -60,7 +60,7 @@ class LongStructureTest(unittest.TestCase):
 
     def test_oversized_semantic_segment_is_physically_split(self) -> None:
         blocks = [block("t1", "Text", 100, 1000), block("t2", "Text", 4200, 5000)]
-        from afac_pipeline.long_models import SemanticSegment
+        from afac_pipeline.long.models import SemanticSegment
 
         segments = [SemanticSegment("body", "body", 0, 9000)]
         completed = attach_physical_parts(segments, blocks, 600, self.config)

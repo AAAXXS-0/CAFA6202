@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 from statistics import median
 
-from .long_config import LongConfig
-from .long_models import Heading, LayoutBlock, SemanticPart, SemanticSegment
-from .models import Box
+from .config import LongConfig
+from .models import Heading, LayoutBlock, SemanticPart, SemanticSegment
+from ..common.models import Box
 
 
 CONTENT_LABELS = {"Text", "Table", "Figure", "Equation", "Caption"}

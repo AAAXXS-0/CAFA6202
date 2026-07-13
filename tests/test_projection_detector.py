@@ -2,8 +2,8 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from afac_pipeline.config import TableConfig
-from afac_pipeline.detectors import ProjectionTableDetector
+from afac_pipeline.table.config import TableConfig
+from afac_pipeline.table.detectors import ProjectionTableDetector
 
 
 class ProjectionDetectorTest(unittest.TestCase):

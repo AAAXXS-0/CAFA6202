@@ -9,22 +9,22 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .cache import ResultCache
-from .hashing import discover_images, group_exact_duplicates
-from .image_backend import ImageBackend, create_backend
-from .long_config import LongConfig
-from .long_detection import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
-from .long_image_io import save_many_crops
-from .long_packing import RecognitionPack, build_pack_prompt, build_recognition_packs
-from .long_models import SemanticPart
-from .long_structure import (
+from ..common.cache import ResultCache
+from ..common.hashing import discover_images, group_exact_duplicates
+from ..common.image_backend import ImageBackend, create_backend
+from .config import LongConfig
+from .detection import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
+from .image_io import save_many_crops
+from .packing import RecognitionPack, build_pack_prompt, build_recognition_packs
+from .models import SemanticPart
+from .structure import (
     attach_physical_parts,
     build_semantic_segments,
     infer_heading_hierarchy,
 )
-from .models import Box
-from .submission import write_submission
-from .vlm_client import FinixDocClient
+from ..common.models import Box
+from ..common.submission import write_submission
+from ..common.vlm_client import FinixDocClient
 
 
 LONG_PROMPT_VERSION = "long-markdown-v2-packed"

@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from afac_pipeline.hashing import group_exact_duplicates, sha256_file
+from afac_pipeline.common.hashing import group_exact_duplicates, sha256_file
 
 
 class HashingTest(unittest.TestCase):

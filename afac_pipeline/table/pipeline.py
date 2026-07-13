@@ -11,20 +11,20 @@ from typing import Any
 
 from PIL import ImageDraw
 
-from .cache import ResultCache
+from ..common.cache import ResultCache
 from .config import TableConfig
 from .detectors import (
     ProjectionTableDetector,
     create_detector,
     suppress_duplicate_boxes,
 )
-from .hashing import discover_images, group_exact_duplicates
-from .image_backend import ImageBackend, create_backend
+from ..common.hashing import discover_images, group_exact_duplicates
+from ..common.image_backend import ImageBackend, create_backend
 from .markdown_merge import MarkdownMergeError, merge_markdown_grid
-from .models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
-from .submission import write_submission
+from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
+from ..common.submission import write_submission
 from .tiling import plan_region_tiles
-from .vlm_client import FinixDocClient
+from ..common.vlm_client import FinixDocClient
 
 
 PROMPT_VERSION = "table-markdown-v1"

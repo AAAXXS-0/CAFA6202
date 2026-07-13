@@ -1,6 +1,6 @@
 import unittest
 
-from afac_pipeline.markdown_merge import merge_horizontal, merge_vertical, parse_first_table
+from afac_pipeline.table.markdown_merge import merge_horizontal, merge_vertical, parse_first_table
 
 
 class MarkdownMergeTest(unittest.TestCase):

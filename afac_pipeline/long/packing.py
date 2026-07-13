@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .long_models import SemanticSegment
-from .models import Box
+from .models import SemanticSegment
+from ..common.models import Box
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .models import Box
+from ..common.models import Box
 
 
 @dataclass(frozen=True)

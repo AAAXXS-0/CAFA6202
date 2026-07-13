@@ -6,12 +6,10 @@ import argparse
 import json
 from pathlib import Path
 
-from afac_pipeline.config import TableConfig
-from afac_pipeline.hashing import discover_images, group_exact_duplicates
-from afac_pipeline.long_config import LongConfig
-from afac_pipeline.long_pipeline import LongPipeline
-from afac_pipeline.table_branch import TablePipeline
-from afac_pipeline.vlm_client import FinixDocClient
+from afac_pipeline.common.hashing import discover_images, group_exact_duplicates
+from afac_pipeline.long import LongConfig, LongPipeline
+from afac_pipeline.table import TableConfig, TablePipeline
+from afac_pipeline.common.vlm_client import FinixDocClient
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -2,7 +2,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from afac_pipeline.detectors import find_content_box
+from afac_pipeline.table.detectors import find_content_box
 
 
 class ContentBoxTest(unittest.TestCase):

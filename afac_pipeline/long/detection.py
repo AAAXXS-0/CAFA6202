@@ -6,9 +6,9 @@ from abc import ABC, abstractmethod
 import importlib.util
 from pathlib import Path
 
-from .long_config import LongConfig
-from .long_models import DetectionWindow, LayoutBlock
-from .models import Box
+from .config import LongConfig
+from .models import DetectionWindow, LayoutBlock
+from ..common.models import Box
 
 
 CANONICAL_LABELS = {

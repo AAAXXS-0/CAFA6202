@@ -5,11 +5,11 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from afac_pipeline.long_config import LongConfig
-from afac_pipeline.long_detection import LongLayoutDetector
-from afac_pipeline.long_models import DetectionWindow, LayoutBlock
-from afac_pipeline.long_pipeline import LongPipeline, merge_markdown_overlap
-from afac_pipeline.models import Box
+from afac_pipeline.long.config import LongConfig
+from afac_pipeline.long.detection import LongLayoutDetector
+from afac_pipeline.long.models import DetectionWindow, LayoutBlock
+from afac_pipeline.long.pipeline import LongPipeline, merge_markdown_overlap
+from afac_pipeline.common.models import Box
 
 
 class FakeLongDetector(LongLayoutDetector):

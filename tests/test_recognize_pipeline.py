@@ -6,8 +6,8 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from afac_pipeline.config import TableConfig
-from afac_pipeline.table_branch import TablePipeline
+from afac_pipeline.table.config import TableConfig
+from afac_pipeline.table.pipeline import TablePipeline
 
 
 class FakeClient:

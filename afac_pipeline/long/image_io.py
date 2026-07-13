@@ -11,8 +11,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from .image_backend import ImageBackend, PillowBackend, VipsBackend
-from .models import Box
+from ..common.image_backend import ImageBackend, PillowBackend, VipsBackend
+from ..common.models import Box
 
 
 def save_many_crops(
