@@ -1,0 +1,17 @@
+{
+  "backend": "auto",
+  "detector": "auto",
+  "yolo_model_path": "360LayoutAnalysis/weights/report-8n.pt",
+  "yolo_confidence": 0.25,
+  "yolo_imgsz": 1280,
+  "preview_max_side": 1800,
+  "max_vlm_side": 3900,
+  "tile_overlap": 160,
+  "single_tile_min_scale": 0.65,
+  "table_box_padding_ratio": 0.015,
+  "projection_threshold": 225,
+  "projection_min_line_ratio": 0.22,
+  "projection_min_lines": 3,
+  "projection_max_line_gap_ratio": 0.10,
+  "pipeline_version": "table-v1"
+}

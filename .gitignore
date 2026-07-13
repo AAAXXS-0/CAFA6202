@@ -1,0 +1,24 @@
+# 原始赛题数据与模型权重体积较大，不进入代码仓库
+raw_data/
+360LayoutAnalysis/
+*.pt
+
+# 本地运行产生的中间结果
+work/
+outputs/
+runs/
+sliced_chunks/
+submission.csv
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 编辑器与系统文件
+.DS_Store
+*:Zone.Identifier
+.idea/
+.vscode/

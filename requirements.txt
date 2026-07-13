@@ -1,0 +1,9 @@
+# 核心依赖：公共处理、无参数表格检测、切图与测试
+Pillow>=10.0,<13
+numpy>=1.26,<3
+
+# 推荐依赖：流式读取超大 PNG，系统还需安装 libvips
+pyvips>=2.2,<3
+
+# 可选依赖：使用 360LayoutAnalysis 的 YOLO 权重时安装
+ultralytics>=8.2,<9
