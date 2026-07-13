@@ -1,4 +1,4 @@
-"""AFAC 图表分支命令行入口。"""
+"""AFAC 图表与长图分支命令行入口。"""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ from pathlib import Path
 
 from afac_pipeline.config import TableConfig
 from afac_pipeline.hashing import discover_images, group_exact_duplicates
+from afac_pipeline.long_config import LongConfig
+from afac_pipeline.long_pipeline import LongPipeline
 from afac_pipeline.table_branch import TablePipeline
 from afac_pipeline.vlm_client import FinixDocClient
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="AFAC 2026 图表文档解析工作流")
+    parser = argparse.ArgumentParser(description="AFAC 2026 文档解析工作流")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     hash_parser = subparsers.add_parser("hash-report", help="统计字节完全相同的图片")
@@ -24,6 +26,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--work-dir", default=Path("work/tables"), type=Path)
     prepare.add_argument("--config", type=Path)
 
+    prepare_long = subparsers.add_parser("prepare-long", help="滑窗检测并二次切分长图")
+    prepare_long.add_argument("--input-dir", required=True, type=Path)
+    prepare_long.add_argument("--work-dir", default=Path("work/long"), type=Path)
+    prepare_long.add_argument("--config", type=Path)
+
     run = subparsers.add_parser("run-tables", help="调用 FinixDoc-VL 并输出图表 CSV")
     run.add_argument("--manifest", required=True, type=Path)
     run.add_argument("--work-dir", default=Path("work/tables"), type=Path)
@@ -32,6 +39,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run.add_argument("--model", default="FinixDoc-VL")
     run.add_argument("--output-csv", default=Path("outputs/table_submission.csv"), type=Path)
+
+    run_long = subparsers.add_parser("run-long", help="调用 FinixDoc-VL 并输出长图 CSV")
+    run_long.add_argument("--manifest", required=True, type=Path)
+    run_long.add_argument("--work-dir", default=Path("work/long"), type=Path)
+    run_long.add_argument("--config", type=Path)
+    run_long.add_argument("--api-url", required=True)
+    run_long.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
+    run_long.add_argument("--model", default="FinixDoc-VL")
+    run_long.add_argument("--output-csv", default=Path("outputs/long_submission.csv"), type=Path)
     return parser
 
 
@@ -41,6 +57,22 @@ def _config_for_run(config_path: Path | None, manifest_path: Path) -> TableConfi
     with manifest_path.open("r", encoding="utf-8") as file:
         manifest = json.load(file)
     return TableConfig(**manifest["config"])
+
+
+def _long_config_for_run(config_path: Path | None, manifest_path: Path) -> LongConfig:
+    if config_path is not None:
+        return LongConfig.from_json(config_path)
+    with manifest_path.open("r", encoding="utf-8") as file:
+        manifest = json.load(file)
+    return LongConfig(**manifest["config"])
+
+
+def _client(args: argparse.Namespace) -> FinixDocClient:
+    return FinixDocClient(
+        api_url=args.api_url,
+        model=args.model,
+        api_key_env=args.api_key_env,
+    )
 
 
 def main() -> None:
@@ -68,22 +100,27 @@ def main() -> None:
         return
 
     if args.command == "prepare-tables":
-        config = TableConfig.from_json(args.config)
-        pipeline = TablePipeline(config, args.work_dir)
+        pipeline = TablePipeline(TableConfig.from_json(args.config), args.work_dir)
         manifest = pipeline.prepare_directory(args.input_dir)
         print(f"图表切分完成：{manifest}")
         return
 
+    if args.command == "prepare-long":
+        pipeline = LongPipeline(LongConfig.from_json(args.config), args.work_dir)
+        manifest = pipeline.prepare_directory(args.input_dir)
+        print(f"长图二次切分完成：{manifest}")
+        return
+
     if args.command == "run-tables":
-        config = _config_for_run(args.config, args.manifest)
-        pipeline = TablePipeline(config, args.work_dir)
-        client = FinixDocClient(
-            api_url=args.api_url,
-            model=args.model,
-            api_key_env=args.api_key_env,
-        )
-        results = pipeline.recognize_dataset(args.manifest, client, args.output_csv)
-        print(f"识别完成，共 {len(results)} 张：{args.output_csv}")
+        pipeline = TablePipeline(_config_for_run(args.config, args.manifest), args.work_dir)
+        results = pipeline.recognize_dataset(args.manifest, _client(args), args.output_csv)
+        print(f"图表识别完成，共 {len(results)} 张：{args.output_csv}")
+        return
+
+    if args.command == "run-long":
+        pipeline = LongPipeline(_long_config_for_run(args.config, args.manifest), args.work_dir)
+        results = pipeline.recognize_dataset(args.manifest, _client(args), args.output_csv)
+        print(f"长图识别完成，共 {len(results)} 张：{args.output_csv}")
 
 
 if __name__ == "__main__":

@@ -7,3 +7,4 @@ pyvips>=2.2,<3
 
 # 可选依赖：使用 360LayoutAnalysis 的 YOLO 权重时安装
 ultralytics>=8.2,<9
+dill>=0.3,<1

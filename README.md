@@ -1,4 +1,4 @@
-# AFAC 2026 图表文档解析工作流
+# AFAC 2026 文档解析工作流
 
 当前仓库实现：
 
@@ -8,7 +8,8 @@
 - 检测框从缩略图映射回原图，再从原图裁切；
 - 超大表格二维切片、切片级 API 缓存、Markdown 表格合并；
 - FinixDoc-VL API 隔离适配器与赛事 CSV 输出；
-- 长图分支只保留接口，尚未实现。
+- 长图 2048/1792 滑窗、general6 版面检测、标题层级分析与二次切块；
+- 长图和图表由各自命令显式接收赛题目录，不做自动路由。
 
 ## 1. SHA-256 为什么能用于这里
 
@@ -126,12 +127,7 @@ python main.py run-tables \
 
 ## 7. 长图分支
 
-长图位置在 [afac_pipeline/long_branch.py](afac_pipeline/long_branch.py)。它只定义：
-
-- `prepare(input_dir, work_dir)`；
-- `recognize(manifest_path)`。
-
-图表分支不会调用这里，也不会把自己的二维表格切片逻辑套到长图上。
+长图实现位于 afac_pipeline/long_pipeline.py，使用 general6-8n.pt，不依赖 Toc 标签。完整标题规则、目录结构、运行命令和校验方式见 README_LONG.md。图表与长图分支保持隔离，不会互相套用切块逻辑。
 
 ## 8. 测试
 
@@ -141,4 +137,4 @@ python main.py run-tables \
 python -m unittest discover -s tests -v
 ```
 
-覆盖内容包括精确哈希分组、超大表格切片尺寸、横纵 Markdown 聚合、投影检测和重复图片准备流程。
+覆盖内容包括精确哈希分组、图表聚合、长图滑窗、标题层级、语义覆盖、缓存和 CSV 输出。

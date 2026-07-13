@@ -1,10 +1,12 @@
 """AFAC 2026 文档解析工作流。
 
-当前版本只实现公共处理与图表分支。长图分支故意保留为空接口，
-方便后续按独立方案开发，避免两个分支互相耦合。
+当前版本实现公共处理、图表分支与长图分支。两个分支共享缓存和 CSV 输出，
+但检测、切块与聚合逻辑保持相互隔离。
 """
 
 from .config import TableConfig
+from .long_config import LongConfig
+from .long_pipeline import LongPipeline
 from .table_branch import TablePipeline
 
-__all__ = ["TableConfig", "TablePipeline"]
+__all__ = ["TableConfig", "TablePipeline", "LongConfig", "LongPipeline"]
