@@ -15,19 +15,22 @@ from ..common.image_backend import ImageBackend, create_backend
 from .config import LongConfig
 from .步骤003_滑窗与YOLO检测 import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
 from .步骤002_图片读写与裁切 import save_many_crops
-from .步骤005_大模型请求打包 import RecognitionPack, build_pack_prompt, build_recognition_packs
-from .步骤001_数据定义 import SemanticPart
-from .步骤004_标题层级与二次分块 import (
-    attach_physical_parts,
-    build_semantic_segments,
-    infer_heading_hierarchy,
+from .步骤005_大模型请求打包 import (
+    RecognitionPack,
+    build_adaptive_recognition_packs,
+    build_pack_prompt,
+    normalize_markdown_heading_levels,
+)
+from .步骤004_自适应安全切块 import (
+    build_adaptive_chunks,
+    build_row_ink_projection,
 )
 from ..common.models import Box
 from ..common.submission import write_submission
 from ..common.vlm_client import FinixDocClient
 
 
-LONG_PROMPT_VERSION = "long-markdown-v2-packed"
+LONG_PROMPT_VERSION = "long-markdown-v3-adaptive-safe-cut"
 
 
 def _dump_json(path: Path, value: Any) -> None:
@@ -39,36 +42,6 @@ def _dump_json(path: Path, value: Any) -> None:
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
-
-
-def build_long_prompt(part: SemanticPart) -> str:
-    role_instructions = {
-        "front_matter": "这是文档前置信息，保留公司名、产品名、版本号和所有可见文字。",
-        "toc": "这是目录区域，严格保持目录项的先后顺序、编号和页码，不要补全不可见目录项。",
-        "body_intro": "这是正文开头，保留正文一级标题及其后的全部可见内容。",
-        "h2_intro": "这是二级标题及其直属正文，二级标题使用 ##。",
-        "h2_body": "这是一个二级标题完整章节，二级标题使用 ##。",
-        "h3_body": "这是三级标题章节；若图中同时出现父级标题，父级使用 ##，子级使用 ###。",
-        "body": "这是正文内容，按图片中的标题和段落结构输出。",
-    }
-    levels = "、".join(f"H{level}" for level in part.expected_heading_levels) or "无强制标题"
-    return f"""请把这张金融文档长图切片转换为与原图严格对应的 Markdown。
-
-区域类型：{part.role}
-逻辑段：{part.segment_id}
-物理分块：{part.part_index + 1}/{part.part_count}
-当前切片预期首次出现的标题层级：{levels}
-{role_instructions.get(part.role, role_instructions['body'])}
-
-要求：
-1. 只输出图片中真实可见的内容，严禁补全、总结、解释或改写。
-2. 保持文字、数字、编号、标点、特殊符号、列表和表格的原始顺序。
-3. 标题层级遵循提示；普通加粗文字不要擅自提升为标题。
-4. 如果切片从段落中间开始或结束，只抄录可见部分，不猜测缺失内容。
-5. 不要输出 Markdown 代码围栏、识别说明、页码统计或置信度。
-6. 相邻物理块包含少量重叠内容时照实输出，程序会在接缝处去重。
-
-直接输出 Markdown："""
 
 
 def merge_markdown_overlap(left: str, right: str, max_chars: int = 1600) -> str:
@@ -124,7 +97,6 @@ class LongPipeline:
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
         window_dir = image_dir / "detection_windows"
-        semantic_dir = image_dir / "semantic_crops"
         request_dir = image_dir / "vlm_requests"
         image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -143,19 +115,25 @@ class LongPipeline:
 
         detector = self._prepare_detector()
         blocks = detector.detect(window_paths, windows, meta.width, meta.height)
-        logical_titles, headings = infer_heading_hierarchy(blocks, meta.width, self.config)
-        segments = build_semantic_segments(meta.height, blocks, headings)
-        segments = attach_physical_parts(segments, blocks, meta.width, self.config)
-        request_packs = build_recognition_packs(
-            segments, meta.width, self.config.max_vlm_height
+        projection = build_row_ink_projection(
+            window_paths,
+            windows,
+            meta.height,
+            sample_width=self.config.projection_sample_width,
+            white_threshold=self.config.projection_white_threshold,
+        )
+        safe_chunks, adaptive_debug = build_adaptive_chunks(
+            meta.width,
+            meta.height,
+            projection,
+            blocks,
+            self.config,
+        )
+        request_packs = build_adaptive_recognition_packs(
+            safe_chunks,
+            meta.width,
         )
 
-        crop_requests = [
-            (part.source_box, semantic_dir / part.file_name, 1.0)
-            for segment in segments
-            for part in segment.parts
-        ]
-        save_many_crops(image_path, crop_requests, self.backend)
         request_crops = [
             (pack.source_box, request_dir / pack.file_name, 1.0)
             for pack in request_packs
@@ -163,7 +141,7 @@ class LongPipeline:
         save_many_crops(image_path, request_crops, self.backend)
 
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
@@ -179,9 +157,8 @@ class LongPipeline:
             ),
             "windows": [window.to_dict() for window in windows],
             "layout_blocks": [block.to_dict() for block in blocks],
-            "logical_titles": [title.to_dict() for title in logical_titles],
-            "headings": [heading.to_dict() for heading in headings],
-            "segments": [segment.to_dict() for segment in segments],
+            "adaptive_cutting": adaptive_debug,
+            "safe_chunks": [chunk.to_dict() for chunk in safe_chunks],
             "request_packs": [pack.to_dict() for pack in request_packs],
         }
         manifest_path = image_dir / "manifest.json"
@@ -230,22 +207,6 @@ class LongPipeline:
         _dump_json(output_path, dataset_manifest)
         return output_path
 
-    @staticmethod
-    def _part_from_dict(raw: dict[str, Any]) -> SemanticPart:
-        return SemanticPart(
-            id=str(raw["id"]),
-            segment_id=str(raw["segment_id"]),
-            role=str(raw["role"]),
-            source_box=Box.from_dict(raw["source_box"]),
-            part_index=int(raw["part_index"]),
-            part_count=int(raw["part_count"]),
-            h1_id=raw.get("h1_id"),
-            h2_id=raw.get("h2_id"),
-            h3_id=raw.get("h3_id"),
-            expected_heading_levels=tuple(int(value) for value in raw["expected_heading_levels"]),
-            file_name=str(raw["file_name"]),
-        )
-
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         current = ""
@@ -283,8 +244,14 @@ class LongPipeline:
                 f"{pack.file_name}：{source}完成，Markdown {len(markdown)} 字符",
                 flush=True,
             )
-            current = markdown.strip() if not current else merge_markdown_overlap(current, markdown)
-        return current.strip()
+            if not current:
+                current = markdown.strip()
+            elif pack.overlap_top != 0:
+                # overlap_top=-1 代表旧版清单未知重叠情况，继续使用兼容去重。
+                current = merge_markdown_overlap(current, markdown)
+            else:
+                current = current.rstrip() + "\n\n" + markdown.lstrip()
+        return normalize_markdown_heading_levels(current.strip())
 
     def recognize_dataset(
         self,

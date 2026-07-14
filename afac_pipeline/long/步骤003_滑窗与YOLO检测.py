@@ -151,6 +151,10 @@ class GeneralYoloDetector(LongLayoutDetector):
                     passes_threshold = (
                         threshold is not None and confidence_value >= threshold
                     )
+                    passes_cut_protection = (
+                        label is not None
+                        and confidence_value >= self.config.cut_protection_confidence
+                    )
                     x1, y1, x2, y2 = (round(value) for value in xyxy)
                     global_box = Box(
                         x1,
@@ -175,9 +179,13 @@ class GeneralYoloDetector(LongLayoutDetector):
                             "confidence": confidence_value,
                             "label_threshold": threshold,
                             "passes_label_threshold": passes_threshold,
+                            "cut_protection_threshold": (
+                                self.config.cut_protection_confidence
+                            ),
+                            "passes_cut_protection": passes_cut_protection,
                             "owned_by_window": owned_by_window,
                             "kept_before_global_nms": (
-                                passes_threshold and owned_by_window
+                                passes_cut_protection and owned_by_window
                             ),
                             "local_box": {
                                 "x1": x1,
@@ -188,7 +196,10 @@ class GeneralYoloDetector(LongLayoutDetector):
                             "global_box": global_box.to_dict(),
                         }
                     )
-                    if not passes_threshold or not owned_by_window:
+                    # 新流程把小模型当作保守的版面传感器。语义阈值仍写入审计
+                    # 文件，但最终安全切割使用更低的保护阈值，宁可稍微移动
+                    # 切口，也不能因为低置信度文字框被过滤而把正文切断。
+                    if not passes_cut_protection or not owned_by_window:
                         continue
                     blocks.append(
                         LayoutBlock(
@@ -230,6 +241,7 @@ class GeneralYoloDetector(LongLayoutDetector):
                     "Title": self.config.title_confidence,
                     "Text": self.config.text_confidence,
                     "Other": self.config.other_confidence,
+                    "CutProtection": self.config.cut_protection_confidence,
                 },
                 "note": (
                     "annotated_file 是 Ultralytics model.predict(save=True) 自动输出；"

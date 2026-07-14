@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import replace
 from statistics import median
 
-from .config import LongConfig
-from .步骤001_数据定义 import Heading, LayoutBlock, SemanticPart, SemanticSegment
-from ..common.models import Box
+from ..config import LongConfig
+from ..步骤001_数据定义 import Heading, LayoutBlock, SemanticPart, SemanticSegment
+from ...common.models import Box
 
 
 CONTENT_LABELS = {"Text", "Table", "Figure", "Equation", "Caption"}

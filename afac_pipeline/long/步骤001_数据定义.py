@@ -68,6 +68,30 @@ class Heading:
 
 
 @dataclass(frozen=True)
+class SafeCutChunk:
+    """最终交给视觉大模型的连续原图区域。
+
+    cut_method 描述下边界的产生方式：blank_band 表示从连续空白带安全切开，
+    fallback_overlap 表示找不到安全空白时使用了重叠兜底，document_end 表示
+    当前块已经到达原图结尾。
+    """
+
+    id: str
+    index: int
+    source_box: Box
+    cut_method: str
+    boundary_y: int | None
+    boundary_ink_ratio: float | None
+    overlap_top: int = 0
+    overlap_bottom: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["source_box"] = self.source_box.to_dict()
+        return result
+
+
+@dataclass(frozen=True)
 class SemanticPart:
     id: str
     segment_id: str

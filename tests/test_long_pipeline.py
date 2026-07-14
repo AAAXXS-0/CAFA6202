@@ -57,13 +57,20 @@ class LongPipelineTest(unittest.TestCase):
             self.assertEqual(dataset["image_count"], 1)
             self.assertGreater(detector.window_count, 1)
             self.assertEqual(image_manifest["detector"], "fake-general6")
-            self.assertGreater(len(image_manifest["segments"]), 1)
-            for segment in image_manifest["segments"]:
-                for part in segment["parts"]:
-                    path = Path(dataset["items"][0]["image_manifest"]).parent
-                    crop = path / "semantic_crops" / part["file_name"]
-                    self.assertTrue(crop.is_file())
-                    self.assertLessEqual(part["source_box"]["y2"] - part["source_box"]["y1"], 3900)
+            self.assertEqual(image_manifest["schema_version"], 2)
+            self.assertGreater(len(image_manifest["safe_chunks"]), 1)
+            self.assertGreaterEqual(
+                image_manifest["adaptive_cutting"]["fallback_overlap_count"],
+                1,
+            )
+            manifest_dir = Path(dataset["items"][0]["image_manifest"]).parent
+            for pack in image_manifest["request_packs"]:
+                crop = manifest_dir / "vlm_requests" / pack["file_name"]
+                self.assertTrue(crop.is_file())
+                self.assertLessEqual(
+                    pack["source_box"]["y2"] - pack["source_box"]["y1"],
+                    3900,
+                )
 
     def test_markdown_overlap_is_removed_only_at_seam(self) -> None:
         left = "第一段\n共同接缝文字"

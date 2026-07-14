@@ -1,4 +1,4 @@
-"""不重新切图，按现有长图清单估算 VLM 请求打包数量。"""
+"""不重新切图，按现有长图清单统计实际 VLM 请求数量。"""
 
 from __future__ import annotations
 
@@ -11,56 +11,52 @@ def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def estimate_image(manifest: dict, max_height: int) -> tuple[int, int]:
-    parts = [
-        part
-        for segment in manifest["segments"]
-        for part in segment["parts"]
-    ]
-    parts.sort(key=lambda part: (part["source_box"]["y1"], part["source_box"]["y2"]))
-    groups: list[list[dict]] = []
-    for part in parts:
-        if not groups:
-            groups.append([part])
-            continue
-        current = groups[-1]
-        start = current[0]["source_box"]["y1"]
-        end = max(item["source_box"]["y2"] for item in current)
-        box = part["source_box"]
-        if box["y1"] >= end and box["y2"] - start <= max_height:
-            current.append(part)
-        else:
-            groups.append([part])
-    maximum = max(
-        max(item["source_box"]["y2"] for item in group)
-        - min(item["source_box"]["y1"] for item in group)
-        for group in groups
-    )
-    return len(groups), maximum
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="估算长图 VLM 请求数")
+    parser = argparse.ArgumentParser(description="统计长图 VLM 请求数")
     parser.add_argument("--manifest", required=True, type=Path)
     args = parser.parse_args()
     dataset = load(args.manifest)
-    max_height = dataset["config"]["max_vlm_height"]
+
     rows = []
     total = 0
     maximum = 0
+    safe_cuts = 0
+    fallback_overlaps = 0
     for item in dataset["items"]:
         if item["duplicate_of"] is not None:
             continue
-        count, image_max = estimate_image(load(Path(item["image_manifest"])), max_height)
+        manifest = load(Path(item["image_manifest"]))
+        packs = manifest["request_packs"]
+        count = len(packs)
+        image_maximum = max(
+            (
+                pack["source_box"]["y2"] - pack["source_box"]["y1"]
+                for pack in packs
+            ),
+            default=0,
+        )
+        adaptive = manifest.get("adaptive_cutting", {})
         total += count
-        maximum = max(maximum, image_max)
-        rows.append({"file_name": item["file_name"], "estimated_requests": count})
+        maximum = max(maximum, image_maximum)
+        safe_cuts += int(adaptive.get("safe_cut_count", 0))
+        fallback_overlaps += int(adaptive.get("fallback_overlap_count", 0))
+        rows.append(
+            {
+                "file_name": item["file_name"],
+                "requests": count,
+                "safe_cuts": adaptive.get("safe_cut_count", 0),
+                "fallback_overlaps": adaptive.get("fallback_overlap_count", 0),
+            }
+        )
+
     print(
         json.dumps(
             {
                 "unique_images": len(rows),
-                "estimated_requests": total,
+                "requests": total,
                 "max_request_height": maximum,
+                "safe_cuts": safe_cuts,
+                "fallback_overlaps": fallback_overlaps,
                 "images": rows,
             },
             ensure_ascii=False,

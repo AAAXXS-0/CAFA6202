@@ -2,7 +2,10 @@ import unittest
 
 from afac_pipeline.long.config import LongConfig
 from afac_pipeline.long.步骤001_数据定义 import LayoutBlock
-from afac_pipeline.long.步骤004_标题层级与二次分块 import infer_heading_hierarchy, is_centered
+from afac_pipeline.long.工具.工具004_旧标题层级分析 import (
+    infer_heading_hierarchy,
+    is_centered,
+)
 from afac_pipeline.common.models import Box
 
 

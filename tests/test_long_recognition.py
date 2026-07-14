@@ -38,9 +38,7 @@ class FakeClient:
         self.calls += 1
         if "严禁补全" not in prompt or not image_path.is_file():
             raise AssertionError("长图请求缺少约束或图片")
-        if "front_matter" in prompt:
-            return "前置信息\n\n# 正文标题\n\n正文内容"
-        return "# 正文标题\n\n正文内容"
+        return "### 1 总则\n\n正文内容"
 
 
 class LongRecognitionTest(unittest.TestCase):
@@ -61,7 +59,7 @@ class LongRecognitionTest(unittest.TestCase):
             output_csv = root / "long_submission.csv"
             first = FakeClient()
             results = pipeline.recognize_dataset(manifest, first, output_csv)
-            self.assertEqual(results["long.jpg"], "前置信息\n\n# 正文标题\n\n正文内容")
+            self.assertEqual(results["long.jpg"], "# 1 总则\n\n正文内容")
             self.assertEqual(first.calls, 1)
 
             second = FakeClient()
