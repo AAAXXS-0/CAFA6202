@@ -31,6 +31,38 @@ class DensitySplitTest(unittest.TestCase):
         horizontal, _ = find_density_bands(density)
         self.assertFalse(horizontal)
 
+    def test_three_pixel_periodic_bands_split_seven_stacked_tables(self) -> None:
+        """低清图上只有 3 像素宽的真实表间隔也必须保留。"""
+
+        density = np.full((384, 272), 0.25, dtype=np.float32)
+        for start in (54, 112, 167, 222, 273, 324):
+            density[start : start + 3, :] = 0.012
+        horizontal, vertical = find_density_bands(density)
+        boxes = boxes_from_bands(272, 384, horizontal, vertical, density)
+        self.assertEqual(len(horizontal), 6)
+        self.assertFalse(vertical)
+        self.assertEqual(len(boxes), 7)
+
+    def test_dense_periodic_cell_gaps_are_not_used_to_split_tables(self) -> None:
+        """间距很密的重复空隙属于表内列，不应产生大量窄表块。"""
+
+        density = np.full((384, 272), 0.25, dtype=np.float32)
+        for start in range(30, 240, 11):
+            density[:, start : start + 3] = 0.0
+        horizontal, vertical = find_density_bands(density)
+        self.assertFalse(horizontal)
+        self.assertFalse(vertical)
+
+    def test_unequal_double_gap_keeps_only_the_stronger_split(self) -> None:
+        """小块—大块—小块且两带不等宽时，避免把版面过切成三块。"""
+
+        density = np.full((384, 272), 0.25, dtype=np.float32)
+        density[71:78, :] = 0.0
+        density[307:315, :] = 0.0
+        horizontal, vertical = find_density_bands(density)
+        self.assertEqual(len(horizontal), 1)
+        self.assertFalse(vertical)
+
 
 if __name__ == "__main__":
     unittest.main()
