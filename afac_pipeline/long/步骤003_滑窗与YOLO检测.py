@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from .config import LongConfig
-from .models import DetectionWindow, LayoutBlock
+from .步骤001_数据定义 import DetectionWindow, LayoutBlock
 from ..common.models import Box
 
 

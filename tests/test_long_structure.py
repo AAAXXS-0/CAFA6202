@@ -1,8 +1,8 @@
 import unittest
 
 from afac_pipeline.long.config import LongConfig
-from afac_pipeline.long.models import LayoutBlock
-from afac_pipeline.long.structure import (
+from afac_pipeline.long.步骤001_数据定义 import LayoutBlock
+from afac_pipeline.long.步骤004_标题层级与二次分块 import (
     attach_physical_parts,
     build_semantic_segments,
     infer_heading_hierarchy,
@@ -60,7 +60,7 @@ class LongStructureTest(unittest.TestCase):
 
     def test_oversized_semantic_segment_is_physically_split(self) -> None:
         blocks = [block("t1", "Text", 100, 1000), block("t2", "Text", 4200, 5000)]
-        from afac_pipeline.long.models import SemanticSegment
+        from afac_pipeline.long.步骤001_数据定义 import SemanticSegment
 
         segments = [SemanticSegment("body", "body", 0, 9000)]
         completed = attach_physical_parts(segments, blocks, 600, self.config)

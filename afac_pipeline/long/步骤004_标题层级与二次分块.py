@@ -6,7 +6,7 @@ from dataclasses import replace
 from statistics import median
 
 from .config import LongConfig
-from .models import Heading, LayoutBlock, SemanticPart, SemanticSegment
+from .步骤001_数据定义 import Heading, LayoutBlock, SemanticPart, SemanticSegment
 from ..common.models import Box
 
 

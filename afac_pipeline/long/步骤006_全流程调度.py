@@ -13,11 +13,11 @@ from ..common.cache import ResultCache
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
 from .config import LongConfig
-from .detection import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
-from .image_io import save_many_crops
-from .packing import RecognitionPack, build_pack_prompt, build_recognition_packs
-from .models import SemanticPart
-from .structure import (
+from .步骤003_滑窗与YOLO检测 import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
+from .步骤002_图片读写与裁切 import save_many_crops
+from .步骤005_大模型请求打包 import RecognitionPack, build_pack_prompt, build_recognition_packs
+from .步骤001_数据定义 import SemanticPart
+from .步骤004_标题层级与二次分块 import (
     attach_physical_parts,
     build_semantic_segments,
     infer_heading_hierarchy,

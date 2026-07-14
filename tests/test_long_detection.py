@@ -1,8 +1,8 @@
 import unittest
 
 from afac_pipeline.long.config import LongConfig
-from afac_pipeline.long.detection import deduplicate_layout_blocks, plan_detection_windows
-from afac_pipeline.long.models import LayoutBlock
+from afac_pipeline.long.步骤003_滑窗与YOLO检测 import deduplicate_layout_blocks, plan_detection_windows
+from afac_pipeline.long.步骤001_数据定义 import LayoutBlock
 from afac_pipeline.common.models import Box
 
 

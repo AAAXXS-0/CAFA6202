@@ -1,7 +1,7 @@
 import unittest
 
-from afac_pipeline.long.models import SemanticPart, SemanticSegment
-from afac_pipeline.long.packing import build_recognition_packs
+from afac_pipeline.long.步骤001_数据定义 import SemanticPart, SemanticSegment
+from afac_pipeline.long.步骤005_大模型请求打包 import build_recognition_packs
 from afac_pipeline.common.models import Box
 
 

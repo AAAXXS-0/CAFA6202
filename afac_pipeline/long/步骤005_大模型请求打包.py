@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .models import SemanticSegment
+from .步骤001_数据定义 import SemanticSegment
 from ..common.models import Box
 
 

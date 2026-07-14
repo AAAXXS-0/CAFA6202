@@ -6,9 +6,9 @@ import unittest
 from PIL import Image, ImageDraw
 
 from afac_pipeline.long.config import LongConfig
-from afac_pipeline.long.detection import LongLayoutDetector
-from afac_pipeline.long.models import DetectionWindow, LayoutBlock
-from afac_pipeline.long.pipeline import LongPipeline, merge_markdown_overlap
+from afac_pipeline.long.步骤003_滑窗与YOLO检测 import LongLayoutDetector
+from afac_pipeline.long.步骤001_数据定义 import DetectionWindow, LayoutBlock
+from afac_pipeline.long.步骤006_全流程调度 import LongPipeline, merge_markdown_overlap
 from afac_pipeline.common.models import Box
 
 

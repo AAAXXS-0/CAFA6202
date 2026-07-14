@@ -15,6 +15,19 @@
     → 相邻请求结果接缝去重与 Markdown 聚合
 ```
 
+## 代码阅读顺序
+
+```text
+步骤001_数据定义.py             # 滑窗、检测框、标题和语义块的数据结构
+步骤002_图片读写与裁切.py       # 从超长原图保存滑窗和最终裁片
+步骤003_滑窗与YOLO检测.py       # 2048/1792 滑窗、general6、责任区与 NMS
+步骤004_标题层级与二次分块.py   # Title 合并、H1/H2/H3 和语义分段
+步骤005_大模型请求打包.py       # 把细粒度语义块合并成 VLM 请求图
+步骤006_全流程调度.py           # 准备目录、API 缓存、Markdown 聚合与 CSV
+```
+
+`工具/` 中的文件同样按使用顺序编号：先检查准备结果，再绘制检测图，最后估算 API 请求量。
+
 ## 1. 配置
 
 配置示例为 `afac_pipeline/long/config.example.json`，关键参数为：
@@ -103,8 +116,8 @@ python main.py run-long \
 ## 6. 校验与调试
 
 ```bash
-python afac_pipeline/long/tools/validate_prepared.py --manifest work/long/dataset_manifest.json
-python afac_pipeline/long/tools/estimate_requests.py --manifest work/long/dataset_manifest.json
+python afac_pipeline/long/工具/工具001_检查准备结果.py --manifest work/long/dataset_manifest.json
+python afac_pipeline/long/工具/工具003_估算请求数量.py --manifest work/long/dataset_manifest.json
 python -m unittest discover -s tests -v
 ```
 
