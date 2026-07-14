@@ -9,6 +9,7 @@ outputs/
 runs/
 sliced_chunks/
 submission.csv
+archives/
 
 # Python 缓存与虚拟环境
 __pycache__/
