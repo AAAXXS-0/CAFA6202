@@ -72,7 +72,7 @@ work/long/
 
 标题文字在小模型阶段未知，因此磁盘目录使用稳定 ID；FinixDoc-VL 返回标题文字后写入 Markdown，不用未经 OCR 清洗的标题文字重命名目录。
 
-当配置 `save_yolo_debug=true` 时，`yolo_raw/*.jpg` 是 Ultralytics 原生 `Results.save()` 标框图，`predictions.json` 记录每个原始框是否通过分类阈值和滑窗责任区；可用于区分模型误检与代码后处理问题。
+当配置 `save_yolo_debug=true` 时，`yolo_raw/` 中的图片是 Ultralytics 原生 `model.predict(save=True)` 自动输出；为避免批次间的 `image0.jpg` 重名，图片按 `批次000/`、`批次001/` 分目录保存。`predictions.json` 记录每个原始框是否通过分类阈值和滑窗责任区；可用于区分模型误检与代码后处理问题。
 
 `semantic_crops/` 保留按 H2/H3 组织的细粒度审计切块。`vlm_requests/` 将坐标连续的小块重新打包，以控制 API 调用量，同时保证每个请求图不超过 3900px 高。
 

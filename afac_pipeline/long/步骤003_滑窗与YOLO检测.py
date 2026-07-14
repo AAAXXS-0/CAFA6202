@@ -113,13 +113,24 @@ class GeneralYoloDetector(LongLayoutDetector):
         for batch_start in range(0, len(window_paths), batch_size):
             batch_paths = window_paths[batch_start : batch_start + batch_size]
             batch_windows = windows[batch_start : batch_start + batch_size]
+            batch_output_dir = (
+                raw_output_dir / f"批次{batch_start // batch_size:03d}"
+                if raw_output_dir is not None
+                else None
+            )
             results = self.model.predict(
                 source=[str(path) for path in batch_paths],
                 conf=self.config.yolo_base_confidence,
                 imgsz=self.config.yolo_imgsz,
                 device="cpu",
                 verbose=False,
-                save=False,
+                # 示例配置中 save_yolo_debug=true，因此这里实际等价于 save=True。
+                # project/name 把 Ultralytics 自动输出约束在当前图片目录，避免
+                # 散落到仓库根目录的 runs/detect/predict*。
+                save=self.config.save_yolo_debug,
+                project=str(batch_output_dir.parent) if batch_output_dir else None,
+                name=batch_output_dir.name if batch_output_dir else None,
+                exist_ok=True,
                 stream=False,
             )
             for result, window, window_path in zip(results, batch_windows, batch_paths):
@@ -190,10 +201,13 @@ class GeneralYoloDetector(LongLayoutDetector):
                     )
 
                 if raw_output_dir is not None:
-                    annotated_name = f"{window_path.stem}_yolo.jpg"
-                    # 使用 Ultralytics 自己的 plot/save，图上的类别、置信度和框
-                    # 与 model.predict 返回的原始 Results 完全一致。
-                    result.save(filename=str(raw_output_dir / annotated_name))
+                    # Ultralytics 对 Python 图片列表使用 image0.jpg 等名称；
+                    # 每批放入独立子目录，保留官方文件且避免后续批次覆盖。
+                    if batch_output_dir is None:
+                        raise RuntimeError("YOLO 自动保存目录未初始化")
+                    annotated_name = str(
+                        Path(batch_output_dir.name) / Path(result.path).name
+                    )
                     raw_records.append(
                         {
                             "window_index": window.index,
@@ -218,7 +232,7 @@ class GeneralYoloDetector(LongLayoutDetector):
                     "Other": self.config.other_confidence,
                 },
                 "note": (
-                    "annotated_file 是 Ultralytics 原始 Results.save 输出；"
+                    "annotated_file 是 Ultralytics model.predict(save=True) 自动输出；"
                     "predictions 记录后续阈值和窗口责任区判断。"
                 ),
                 "windows": raw_records,
