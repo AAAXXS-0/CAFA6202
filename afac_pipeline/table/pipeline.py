@@ -250,6 +250,8 @@ class TablePipeline:
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         region_markdowns: list[str] = []
+        total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
+        completed_tiles = 0
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
             response_dir = manifest_path.parent / "responses"
@@ -261,7 +263,14 @@ class TablePipeline:
                 image_bytes = tile_path.read_bytes()
                 cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
                 markdown = self.cache.get_tile(cache_key)
+                source = "缓存"
                 if markdown is None:
+                    source = "API"
+                    print(
+                        f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
+                        f"{tile.file_name}：请求 API",
+                        flush=True,
+                    )
                     markdown = client.recognize(tile_path, prompt)
                     self.cache.put_tile(
                         cache_key,
@@ -274,6 +283,12 @@ class TablePipeline:
                     )
                 (response_dir / f"{Path(tile.file_name).stem}.md").write_text(
                     markdown, encoding="utf-8"
+                )
+                completed_tiles += 1
+                print(
+                    f"[图表识别 {completed_tiles:02d}/{total_tiles:02d}] "
+                    f"{tile.file_name}：{source}完成，Markdown {len(markdown)} 字符",
+                    flush=True,
                 )
                 contents[(tile.row_index, tile.column_index)] = markdown
 

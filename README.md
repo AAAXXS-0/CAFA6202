@@ -42,7 +42,8 @@ python main.py --help
 
 - `hash-report`：统计字节完全相同的图片；
 - `prepare-tables` / `run-tables`：准备、识别图表目录；
-- `prepare-long` / `run-long`：准备、识别长图目录。
+- `prepare-long` / `run-long`：准备、识别长图目录；
+- `combine-submissions`：按官方模板顺序合并长图和图表 CSV。
 
 配置示例分别位于：
 
@@ -54,6 +55,33 @@ python main.py --help
 SHA-256 根据文件的全部字节生成摘要。摘要相同可以视为文件字节完全相同，因此能够安全复用解析结果；重新压缩、修改元数据或改变一个像素都会产生不同摘要。它不判断“视觉相似”，不会把内容接近但文字不同的表格误合并。
 
 当前 A 榜数据实测：图表 50 张中 49 张唯一图；长图 50 张中 33 张唯一图，后者可直接复用 17 张的完整结果。
+
+## 官方 API 与最终提交
+
+官方 `FinixDoc_VL调用.txt` 使用 multipart 表单上传，客户端会解析外层业务 JSON、内层模型 JSON 和 Markdown 代码围栏：
+
+```bash
+python main.py run-long \
+  --manifest work/long/dataset_manifest.json \
+  --work-dir work/long \
+  --credentials-file FinixDoc_VL调用.txt \
+  --user-id finixB2002 \
+  --output-csv outputs/long_submission.csv
+```
+
+如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。每个成功切片即时进入 SQLite 缓存。
+
+长图和图表各自生成 50 行 CSV 后，按 100 行官方模板严格合并：
+
+```bash
+python main.py combine-submissions \
+  --template finix_ab_A_submit_mock.csv \
+  --input-csv outputs/long_submission.csv \
+  --input-csv outputs/table_submission.csv \
+  --output-csv outputs/finix_ab_A_submit.csv
+```
+
+合并时会拒绝重复、缺失、多余文件名和错误表头。
 
 ## 测试
 

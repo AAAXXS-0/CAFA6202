@@ -43,17 +43,17 @@ work/tables/
 ## 4. 调用 FinixDoc-VL
 
 ```bash
-export FINIXDOC_API_KEY="你的密钥"
-
 python main.py run-tables \
   --manifest work/tables/dataset_manifest.json \
   --work-dir work/tables \
-  --api-url "主办方提供的完整接口地址" \
-  --model "FinixDoc-VL" \
+  --credentials-file FinixDoc_VL调用.txt \
+  --user-id finixB2002 \
+  --request-timeout 240 \
+  --max-retries 2 \
   --output-csv outputs/table_submission.csv
 ```
 
-公共客户端位于 `afac_pipeline/common/vlm_client.py`。每个切片响应写入 `responses/` 并进入 SQLite 缓存，中断后重跑不会重复请求成功切片。
+公共客户端位于 `afac_pipeline/common/vlm_client.py`，按官方 multipart 协议上传图片并解析双层 JSON。每个切片响应写入 `responses/` 并进入 SQLite 缓存，中断后重跑不会重复请求成功切片；HTTP 200 的“服务器繁忙”HTML 会被识别为临时错误而不是 Markdown。
 
 ## 5. Markdown 聚合与失败策略
 

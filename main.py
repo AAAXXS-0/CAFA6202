@@ -9,6 +9,7 @@ from pathlib import Path
 from afac_pipeline.common.hashing import discover_images, group_exact_duplicates
 from afac_pipeline.long import LongConfig, LongPipeline
 from afac_pipeline.table import TableConfig, TablePipeline
+from afac_pipeline.common.submission import combine_submissions
 from afac_pipeline.common.vlm_client import FinixDocClient
 
 
@@ -33,8 +34,17 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--manifest", required=True, type=Path)
     run.add_argument("--work-dir", default=Path("work/tables"), type=Path)
     run.add_argument("--config", type=Path)
-    run.add_argument("--api-url", required=True)
+    run.add_argument("--api-url")
+    run.add_argument("--credentials-file", type=Path)
+    run.add_argument("--user-id")
+    run.add_argument(
+        "--protocol",
+        choices=("official_multipart", "chat_completions"),
+        default="official_multipart",
+    )
     run.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
+    run.add_argument("--request-timeout", type=int, default=240)
+    run.add_argument("--max-retries", type=int, default=2)
     run.add_argument("--model", default="FinixDoc-VL")
     run.add_argument("--output-csv", default=Path("outputs/table_submission.csv"), type=Path)
 
@@ -42,10 +52,24 @@ def _parser() -> argparse.ArgumentParser:
     run_long.add_argument("--manifest", required=True, type=Path)
     run_long.add_argument("--work-dir", default=Path("work/long"), type=Path)
     run_long.add_argument("--config", type=Path)
-    run_long.add_argument("--api-url", required=True)
+    run_long.add_argument("--api-url")
+    run_long.add_argument("--credentials-file", type=Path)
+    run_long.add_argument("--user-id")
+    run_long.add_argument(
+        "--protocol",
+        choices=("official_multipart", "chat_completions"),
+        default="official_multipart",
+    )
     run_long.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
+    run_long.add_argument("--request-timeout", type=int, default=240)
+    run_long.add_argument("--max-retries", type=int, default=2)
     run_long.add_argument("--model", default="FinixDoc-VL")
     run_long.add_argument("--output-csv", default=Path("outputs/long_submission.csv"), type=Path)
+
+    combine = subparsers.add_parser("combine-submissions", help="按官方模板合并分支 CSV")
+    combine.add_argument("--template", required=True, type=Path)
+    combine.add_argument("--input-csv", required=True, action="append", type=Path)
+    combine.add_argument("--output-csv", required=True, type=Path)
     return parser
 
 
@@ -66,15 +90,38 @@ def _long_config_for_run(config_path: Path | None, manifest_path: Path) -> LongC
 
 
 def _client(args: argparse.Namespace) -> FinixDocClient:
+    """根据命令行参数创建官方 multipart 或兼容 Chat 协议客户端。"""
+
+    if args.credentials_file is not None:
+        if args.protocol != "official_multipart":
+            raise ValueError("--credentials-file 只适用于 official_multipart 协议")
+        return FinixDocClient.from_official_doc(
+            args.credentials_file,
+            user_id=args.user_id,
+            model=args.model,
+            timeout=args.request_timeout,
+            max_retries=args.max_retries,
+        )
+    if not args.api_url:
+        raise ValueError("未提供 --api-url；也可以用 --credentials-file 读取官方说明")
     return FinixDocClient(
         api_url=args.api_url,
         model=args.model,
         api_key_env=args.api_key_env,
+        protocol=args.protocol,
+        user_id=args.user_id,
+        timeout=args.request_timeout,
+        max_retries=args.max_retries,
     )
 
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.command == "combine-submissions":
+        output = combine_submissions(args.input_csv, args.template, args.output_csv)
+        print(f"提交文件合并完成：{output}")
+        return
+
     if args.command == "hash-report":
         paths = discover_images(args.input_dir)
         groups = group_exact_duplicates(paths)

@@ -111,8 +111,15 @@ class LongPipeline:
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.backend: ImageBackend = create_backend(config.backend)
-        self.detector = detector or GeneralYoloDetector(config)
+        # run-long 只读取已经准备好的裁片，不应强制安装或加载 YOLO。
+        # 首次进入 prepare-long 时再创建检测器，并在后续图片间复用模型实例。
+        self.detector = detector
         self.cache = ResultCache(self.work_dir / "cache.sqlite3")
+
+    def _prepare_detector(self) -> LongLayoutDetector:
+        if self.detector is None:
+            self.detector = GeneralYoloDetector(self.config)
+        return self.detector
 
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
@@ -134,7 +141,8 @@ class LongPipeline:
         save_many_crops(image_path, window_requests, self.backend)
         window_paths = [window_dir / window.file_name for window in windows]
 
-        blocks = self.detector.detect(window_paths, windows, meta.width, meta.height)
+        detector = self._prepare_detector()
+        blocks = detector.detect(window_paths, windows, meta.width, meta.height)
         logical_titles, headings = infer_heading_hierarchy(blocks, meta.width, self.config)
         segments = build_semantic_segments(meta.height, blocks, headings)
         segments = attach_physical_parts(segments, blocks, meta.width, self.config)
@@ -159,7 +167,7 @@ class LongPipeline:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
-            "detector": self.detector.name,
+            "detector": detector.name,
             "config": self.config.to_dict(),
             "windows": [window.to_dict() for window in windows],
             "layout_blocks": [block.to_dict() for block in blocks],
@@ -235,14 +243,22 @@ class LongPipeline:
         current = ""
         response_dir = manifest_path.parent / "responses"
         response_dir.mkdir(parents=True, exist_ok=True)
-        for raw_pack in image_manifest["request_packs"]:
+        raw_packs = image_manifest["request_packs"]
+        for index, raw_pack in enumerate(raw_packs, start=1):
             pack = RecognitionPack.from_dict(raw_pack)
             crop_path = manifest_path.parent / "vlm_requests" / pack.file_name
             prompt = build_pack_prompt(pack)
             image_bytes = crop_path.read_bytes()
             cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
             markdown = self.cache.get_tile(cache_key)
+            source = "缓存"
             if markdown is None:
+                source = "API"
+                print(
+                    f"[长图识别 {index:02d}/{len(raw_packs):02d}] "
+                    f"{pack.file_name}：请求 API",
+                    flush=True,
+                )
                 markdown = client.recognize(crop_path, prompt)
                 self.cache.put_tile(
                     cache_key,
@@ -254,6 +270,11 @@ class LongPipeline:
                     },
                 )
             (response_dir / f"{pack.id}.md").write_text(markdown, encoding="utf-8")
+            print(
+                f"[长图识别 {index:02d}/{len(raw_packs):02d}] "
+                f"{pack.file_name}：{source}完成，Markdown {len(markdown)} 字符",
+                flush=True,
+            )
             current = markdown.strip() if not current else merge_markdown_overlap(current, markdown)
         return current.strip()
 

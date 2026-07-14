@@ -85,17 +85,17 @@ work/long/
 ## 5. 调用 FinixDoc-VL
 
 ```bash
-export FINIXDOC_API_KEY="你的密钥"
-
 python main.py run-long \
   --manifest work/long/dataset_manifest.json \
   --work-dir work/long \
-  --api-url "主办方完整接口地址" \
-  --model "FinixDoc-VL" \
+  --credentials-file FinixDoc_VL调用.txt \
+  --user-id finixB2002 \
+  --request-timeout 240 \
+  --max-retries 2 \
   --output-csv outputs/long_submission.csv
 ```
 
-切片响应和完整图片结果均写入 SQLite 缓存。中断后重跑不会重复请求已经成功的切片，完全重复图片也直接复用完整 Markdown。
+客户端按官方 multipart 协议上传图片，并解析双层 JSON 中的 Markdown。切片响应和完整图片结果均写入 SQLite 缓存，中断后重跑不会重复请求成功切片，完全重复图片也直接复用完整 Markdown。官方网关偶尔会以 HTTP 200 返回“服务器繁忙”HTML；程序会将其识别为临时错误并明确重试，不会污染识别结果。
 
 ## 6. 校验与调试
 
