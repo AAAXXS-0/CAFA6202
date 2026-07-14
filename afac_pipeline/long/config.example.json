@@ -6,6 +6,7 @@
   "yolo_imgsz": 1280,
   "yolo_batch_size": 8,
   "yolo_base_confidence": 0.15,
+  "save_yolo_debug": true,
   "title_confidence": 0.20,
   "text_confidence": 0.25,
   "other_confidence": 0.25,

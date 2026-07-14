@@ -20,6 +20,7 @@ class LongConfig:
     yolo_imgsz: int = 1280
     yolo_batch_size: int = 8
     yolo_base_confidence: float = 0.15
+    save_yolo_debug: bool = False
     title_confidence: float = 0.20
     text_confidence: float = 0.25
     other_confidence: float = 0.25

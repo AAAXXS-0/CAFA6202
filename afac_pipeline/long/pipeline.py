@@ -169,6 +169,14 @@ class LongPipeline:
             "backend": self.backend.name,
             "detector": detector.name,
             "config": self.config.to_dict(),
+            "yolo_raw": (
+                {
+                    "directory": "yolo_raw",
+                    "predictions": "yolo_raw/predictions.json",
+                }
+                if self.config.save_yolo_debug
+                else None
+            ),
             "windows": [window.to_dict() for window in windows],
             "layout_blocks": [block.to_dict() for block in blocks],
             "logical_titles": [title.to_dict() for title in logical_titles],

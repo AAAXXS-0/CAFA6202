@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import importlib.util
+import json
 from pathlib import Path
 
 from .config import LongConfig
@@ -99,7 +100,15 @@ class GeneralYoloDetector(LongLayoutDetector):
     ) -> list[LayoutBlock]:
         if len(window_paths) != len(windows):
             raise ValueError("窗口图片与窗口元数据数量不一致")
+
         blocks: list[LayoutBlock] = []
+        raw_records: list[dict[str, object]] = []
+        raw_output_dir: Path | None = None
+        if self.config.save_yolo_debug and window_paths:
+            # detection_windows/ 与 yolo_raw/ 同属于当前图片 prepared 目录。
+            raw_output_dir = window_paths[0].parent.parent / "yolo_raw"
+            raw_output_dir.mkdir(parents=True, exist_ok=True)
+
         batch_size = self.config.yolo_batch_size
         for batch_start in range(0, len(window_paths), batch_size):
             batch_paths = window_paths[batch_start : batch_start + batch_size]
@@ -113,19 +122,24 @@ class GeneralYoloDetector(LongLayoutDetector):
                 save=False,
                 stream=False,
             )
-            for result, window in zip(results, batch_windows):
+            for result, window, window_path in zip(results, batch_windows, batch_paths):
                 names = result.names
-                for local_index, (xyxy, class_id, confidence) in enumerate(
+                raw_rows = list(
                     zip(
                         result.boxes.xyxy.cpu().tolist(),
                         result.boxes.cls.cpu().tolist(),
                         result.boxes.conf.cpu().tolist(),
                     )
-                ):
+                )
+                window_predictions: list[dict[str, object]] = []
+                for local_index, (xyxy, class_id, confidence) in enumerate(raw_rows):
                     raw_label = str(names[int(class_id)]).strip().lower()
                     label = CANONICAL_LABELS.get(raw_label)
-                    if label is None or float(confidence) < self._threshold(label):
-                        continue
+                    confidence_value = float(confidence)
+                    threshold = self._threshold(label) if label is not None else None
+                    passes_threshold = (
+                        threshold is not None and confidence_value >= threshold
+                    )
                     x1, y1, x2, y2 = (round(value) for value in xyxy)
                     global_box = Box(
                         x1,
@@ -133,22 +147,87 @@ class GeneralYoloDetector(LongLayoutDetector):
                         x2,
                         window.start_y + y2,
                     ).clamp(image_width, image_height)
-                    # 重叠区以框中心点决定归属；完整框通常会由离边缘更远的窗口保留。
                     center_y = (global_box.y1 + global_box.y2) / 2
-                    if not (
+                    owned_by_window = (
                         window.ownership_start_y <= center_y < window.ownership_end_y
-                        or (window.index == len(windows) - 1 and center_y == image_height)
-                    ):
+                        or (
+                            window.index == len(windows) - 1
+                            and center_y == image_height
+                        )
+                    )
+                    window_predictions.append(
+                        {
+                            "id": f"w{window.index:05d}_b{local_index:04d}",
+                            "class_id": int(class_id),
+                            "raw_label": raw_label,
+                            "canonical_label": label,
+                            "confidence": confidence_value,
+                            "label_threshold": threshold,
+                            "passes_label_threshold": passes_threshold,
+                            "owned_by_window": owned_by_window,
+                            "kept_before_global_nms": (
+                                passes_threshold and owned_by_window
+                            ),
+                            "local_box": {
+                                "x1": x1,
+                                "y1": y1,
+                                "x2": x2,
+                                "y2": y2,
+                            },
+                            "global_box": global_box.to_dict(),
+                        }
+                    )
+                    if not passes_threshold or not owned_by_window:
                         continue
                     blocks.append(
                         LayoutBlock(
                             id=f"w{window.index:05d}_b{local_index:04d}",
                             label=label,
                             box=global_box,
-                            confidence=float(confidence),
+                            confidence=confidence_value,
                             source_window=window.index,
                         )
                     )
+
+                if raw_output_dir is not None:
+                    annotated_name = f"{window_path.stem}_yolo.jpg"
+                    # 使用 Ultralytics 自己的 plot/save，图上的类别、置信度和框
+                    # 与 model.predict 返回的原始 Results 完全一致。
+                    result.save(filename=str(raw_output_dir / annotated_name))
+                    raw_records.append(
+                        {
+                            "window_index": window.index,
+                            "window_file": window_path.name,
+                            "annotated_file": annotated_name,
+                            "start_y": window.start_y,
+                            "end_y": window.end_y,
+                            "ownership_start_y": window.ownership_start_y,
+                            "ownership_end_y": window.ownership_end_y,
+                            "predictions": window_predictions,
+                        }
+                    )
+
+        if raw_output_dir is not None:
+            audit = {
+                "model_path": self.config.yolo_model_path,
+                "base_confidence": self.config.yolo_base_confidence,
+                "imgsz": self.config.yolo_imgsz,
+                "label_thresholds": {
+                    "Title": self.config.title_confidence,
+                    "Text": self.config.text_confidence,
+                    "Other": self.config.other_confidence,
+                },
+                "note": (
+                    "annotated_file 是 Ultralytics 原始 Results.save 输出；"
+                    "predictions 记录后续阈值和窗口责任区判断。"
+                ),
+                "windows": raw_records,
+            }
+            (raw_output_dir / "predictions.json").write_text(
+                json.dumps(audit, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
         return deduplicate_layout_blocks(blocks, self.config.deduplicate_iou)
 
 
