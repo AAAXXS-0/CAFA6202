@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, Sequence
 
 import requests
 
@@ -87,10 +88,11 @@ class FinixDocClient:
         model: str = "FinixDoc-VL",
         api_key_env: str = "FINIXDOC_API_KEY",
         timeout: int = 240,
-        max_retries: int = 4,
+        max_retries: int = 50,
         *,
         protocol: str = OFFICIAL_PROTOCOL,
         user_id: str | None = None,
+        user_ids: Sequence[str] | None = None,
         user_id_env: str = "FINIXDOC_USER_ID",
         api_key: str | None = None,
     ) -> None:
@@ -98,6 +100,8 @@ class FinixDocClient:
             raise ValueError("api_url 不能为空")
         if protocol not in {OFFICIAL_PROTOCOL, CHAT_PROTOCOL}:
             raise ValueError(f"不支持的 FinixDoc-VL 协议：{protocol}")
+        if max_retries < 0:
+            raise ValueError("max_retries 不能小于 0")
         self.api_url = api_url
         self.api_model = model
         self.model = f"{model}@{protocol}"
@@ -106,6 +110,9 @@ class FinixDocClient:
         self.max_retries = max_retries
         self.protocol = protocol
         self.user_id = user_id
+        # 列表去重时保留官方顺序；显式指定的 user_id 会在请求时排到第一位。
+        # 这样重试可以切换账号，同时仍尊重用户选定的首个账号。
+        self.user_ids = list(dict.fromkeys(user_ids or ()))
         self.user_id_env = user_id_env
         self._api_key = api_key
 
@@ -117,9 +124,9 @@ class FinixDocClient:
         user_id: str | None = None,
         model: str = "FinixDoc-VL",
         timeout: int = 240,
-        max_retries: int = 4,
+        max_retries: int = 50,
     ) -> "FinixDocClient":
-        """从官方调用说明读取地址和固定凭据，凭据不会写入代码或清单。"""
+        """从官方调用说明读取地址、凭据和全部白名单账号。"""
 
         text = Path(path).read_text(encoding="utf-8-sig")
         url_match = re.search(r"https://[^\s'\"]+/api/finix_doc/call_with_file", text)
@@ -130,6 +137,8 @@ class FinixDocClient:
         selected_user = user_id or users[0]
         if selected_user not in users:
             raise ValueError(f"userId 不在官方白名单中：{selected_user}")
+        selected_index = users.index(selected_user)
+        rotated_users = users[selected_index:] + users[:selected_index]
         return cls(
             api_url=url_match.group(0),
             model=model,
@@ -137,12 +146,22 @@ class FinixDocClient:
             max_retries=max_retries,
             protocol=OFFICIAL_PROTOCOL,
             user_id=selected_user,
+            user_ids=rotated_users,
             api_key=key_match.group(1),
         )
 
-    def _credentials(self) -> tuple[str, str]:
+    def _available_user_ids(self) -> list[str]:
+        """返回可轮换账号，并让显式参数或环境变量中的账号排在第一位。"""
+
+        selected_user = self.user_id or os.environ.get(self.user_id_env)
+        users = list(self.user_ids)
+        if selected_user:
+            users = [selected_user, *(item for item in users if item != selected_user)]
+        return users
+
+    def _credentials(self, active_user_id: str | None = None) -> tuple[str, str]:
         api_key = self._api_key or os.environ.get(self.api_key_env)
-        user_id = self.user_id or os.environ.get(self.user_id_env)
+        user_id = active_user_id or self.user_id or os.environ.get(self.user_id_env)
         if not api_key:
             raise RuntimeError(f"未设置 API Key：请设置 {self.api_key_env} 或使用官方说明文件")
         if not user_id:
@@ -169,7 +188,13 @@ class FinixDocClient:
             ],
         }
 
-    def _recognize_once(self, image_path: Path, prompt: str) -> str:
+    def _recognize_once(
+        self,
+        image_path: Path,
+        prompt: str,
+        *,
+        active_user_id: str | None = None,
+    ) -> str:
         if self.protocol == CHAT_PROTOCOL:
             headers: dict[str, str] = {}
             api_key = self._api_key or os.environ.get(self.api_key_env)
@@ -184,7 +209,7 @@ class FinixDocClient:
             response.raise_for_status()
             return _chat_content(response.json())
 
-        api_key, user_id = self._credentials()
+        api_key, user_id = self._credentials(active_user_id)
         mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
         with image_path.open("rb") as image_file:
             response = requests.post(
@@ -215,12 +240,26 @@ class FinixDocClient:
         return parse_official_response(payload)
 
     def recognize(self, image_path: Path, prompt: str) -> str:
-        """识别一张图片；可重试网络错误、限流和服务端临时错误。"""
+        """识别图片，并在临时错误后轮换白名单账号重试。
+
+        max_retries 表示首次请求失败后最多再试多少次。第 n 次重试前等待
+        n * log2(n) 秒：第一次立即换账号，后续逐步拉长请求间隔。
+        """
 
         last_error: Exception | None = None
-        for attempt in range(self.max_retries):
+        image_path = Path(image_path)
+        users = self._available_user_ids()
+        # Chat 协议不使用 userId；保留 None 占位以复用相同的重试循环。
+        attempt_users: list[str | None] = users or [None]
+        retry_number = 0
+        while True:
+            active_user = attempt_users[retry_number % len(attempt_users)]
             try:
-                return self._recognize_once(Path(image_path), prompt)
+                return self._recognize_once(
+                    image_path,
+                    prompt,
+                    active_user_id=active_user,
+                )
             except FinixDocPermanentError as error:
                 last_error = error
                 break
@@ -231,12 +270,19 @@ class FinixDocClient:
                     status = error.response.status_code
                     if 400 <= status < 500 and status != 429:
                         break
-                if attempt + 1 < self.max_retries:
-                    delay = min(2**attempt, 8)
-                    print(
-                        f"[FinixDoc-VL 重试 {attempt + 2}/{self.max_retries}] "
-                        f"{Path(image_path).name}：{error}；{delay} 秒后重试",
-                        flush=True,
-                    )
+                if retry_number >= self.max_retries:
+                    break
+                retry_number += 1
+                delay = retry_number * math.log2(retry_number)
+                next_user = attempt_users[retry_number % len(attempt_users)]
+                current_user_text = active_user or "无 userId"
+                next_user_text = next_user or "无 userId"
+                print(
+                    f"[FinixDoc-VL 重试 {retry_number}/{self.max_retries}] "
+                    f"{image_path.name}：账号 {current_user_text} 请求失败：{error}；"
+                    f"{delay:.2f} 秒后改用 {next_user_text}",
+                    flush=True,
+                )
+                if delay > 0:
                     time.sleep(delay)
         raise RuntimeError(f"FinixDoc-VL 请求失败：{last_error}") from last_error

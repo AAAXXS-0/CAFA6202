@@ -49,7 +49,7 @@ python main.py run-tables \
   --credentials-file FinixDoc_VL调用.txt \
   --user-id finixB2002 \
   --request-timeout 240 \
-  --max-retries 2 \
+  --max-retries 50 \
   --output-csv outputs/table_submission.csv
 ```
 

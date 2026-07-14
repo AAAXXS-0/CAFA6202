@@ -85,7 +85,7 @@ python main.py run-long \
   --output-csv outputs/long_submission.csv
 ```
 
-如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。每个成功切片即时进入 SQLite 缓存。
+如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。官方说明中的 5 个白名单 userId 会在重试时循环切换，第 n 次重试前等待 `n × log₂(n)` 秒；默认最多重试 50 次。一键脚本可用环境变量 `FINIXDOC_MAX_RETRIES` 修改上限。每个成功切片即时进入 SQLite 缓存。
 
 长图和图表各自生成 50 行 CSV 后，按 100 行官方模板严格合并：
 

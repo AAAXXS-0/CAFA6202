@@ -109,11 +109,11 @@ python main.py run-long \
   --credentials-file FinixDoc_VL调用.txt \
   --user-id finixB2002 \
   --request-timeout 240 \
-  --max-retries 2 \
+  --max-retries 50 \
   --output-csv outputs/long_submission.csv
 ```
 
-客户端按官方 multipart 协议上传图片，并解析双层 JSON 中的 Markdown。切片响应和完整图片结果均写入 SQLite 缓存，中断后重跑不会重复请求成功切片，完全重复图片也直接复用完整 Markdown。官方网关偶尔会以 HTTP 200 返回“服务器繁忙”HTML；程序会将其识别为临时错误并明确重试，不会污染识别结果。
+客户端按官方 multipart 协议上传图片，并解析双层 JSON 中的 Markdown。切片响应和完整图片结果均写入 SQLite 缓存，中断后重跑不会重复请求成功切片，完全重复图片也直接复用完整 Markdown。官方网关偶尔会以 HTTP 200 返回“服务器繁忙”HTML；程序会将其识别为临时错误，在 5 个官方白名单账号间轮换，并按第 n 次重试等待 `n × log₂(n)` 秒，默认最多重试 50 次，不会用错误 HTML 污染识别结果。
 
 ## 6. 校验与调试
 

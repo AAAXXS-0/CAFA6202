@@ -117,11 +117,12 @@ def main() -> int:
     long_manifest = 准备长图(long_config, long_work)
     table_manifest = 准备图表(table_config, table_work)
     user_id = os.environ.get("FINIXDOC_USER_ID", "finixB2002")
+    max_retries = int(os.environ.get("FINIXDOC_MAX_RETRIES", "50"))
     client = FinixDocClient.from_official_doc(
         官方接口说明,
         user_id=user_id,
         timeout=240,
-        max_retries=2,
+        max_retries=max_retries,
     )
     输出目录.mkdir(parents=True, exist_ok=True)
     long_csv = 输出目录 / "长图结果.csv"

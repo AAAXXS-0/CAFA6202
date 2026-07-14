@@ -44,7 +44,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run.add_argument("--request-timeout", type=int, default=240)
-    run.add_argument("--max-retries", type=int, default=2)
+    run.add_argument("--max-retries", type=int, default=50)
     run.add_argument("--model", default="FinixDoc-VL")
     run.add_argument("--output-csv", default=Path("outputs/table_submission.csv"), type=Path)
 
@@ -62,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_long.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run_long.add_argument("--request-timeout", type=int, default=240)
-    run_long.add_argument("--max-retries", type=int, default=2)
+    run_long.add_argument("--max-retries", type=int, default=50)
     run_long.add_argument("--model", default="FinixDoc-VL")
     run_long.add_argument("--output-csv", default=Path("outputs/long_submission.csv"), type=Path)
 
