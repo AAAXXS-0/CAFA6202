@@ -98,3 +98,18 @@ python main.py run-tables \
 python afac_pipeline/table/tools/validate_prepared.py --manifest work/tables/dataset_manifest.json
 python -m unittest discover -s tests -v
 ```
+
+### 无模型表格外轮廓实验
+
+这个工具只验证“强缩小后的二维墨水密度能否找到完整表格”，不会改动正式流程，也不负责内部行列判断：
+
+```bash
+python afac_pipeline/table/tools/experiment_ink_region.py \
+  --image "待测试图片.jpg" \
+  --output-dir "work/验证/无模型墨水定位" \
+  --yolo-manifest "原粗流程单图清单.json"
+```
+
+输出的 `004_最终墨水轮廓.png` 使用绿色多边形表示墨水外轮廓、红色矩形表示完整外接框；`005_墨水轮廓与YOLO对比.png` 额外使用蓝色矩形表示原 YOLO 表格框。
+
+内部行列的正式优先级固定为：先使用传统横竖表格线；只有确认没有可靠表格线时，才使用行列长空白带。

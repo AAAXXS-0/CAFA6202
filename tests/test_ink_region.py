@@ -1,0 +1,28 @@
+import unittest
+
+from PIL import Image, ImageDraw
+
+from afac_pipeline.table.ink_region import detect_ink_regions
+
+
+class InkRegionTest(unittest.TestCase):
+    def test_sparse_trapezoid_text_is_joined_into_complete_region(self) -> None:
+        image = Image.new("RGB", (1000, 700), "white")
+        draw = ImageDraw.Draw(image)
+        for row, y in enumerate(range(130, 591, 55)):
+            left = 150 - row * 5
+            right = 820 + row * 7
+            for x in range(left, right, 95):
+                draw.rectangle((x, y, min(x + 55, right), y + 15), fill="black")
+
+        result = detect_ink_regions(image, coarse_max_side=256)
+        self.assertTrue(result.regions)
+        primary = result.regions[0].box
+        self.assertLessEqual(primary.x1, 170)
+        self.assertGreaterEqual(primary.x2, 850)
+        self.assertLessEqual(primary.y1, 150)
+        self.assertGreaterEqual(primary.y2, 590)
+
+
+if __name__ == "__main__":
+    unittest.main()
