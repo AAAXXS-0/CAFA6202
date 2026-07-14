@@ -23,6 +23,19 @@ class TilingTest(unittest.TestCase):
             self.assertGreater(plan.source_box.width, 0)
             self.assertGreater(plan.source_box.height, 0)
 
+    def test_pixel_fallback_does_not_create_nearly_duplicate_tail_tiles(self) -> None:
+        plans = plan_region_tiles(Box(0, 0, 10984, 7744), 0, 3900, 160, 0.65)
+        self.assertEqual({plan.row_count for plan in plans}, {2})
+        self.assertEqual({plan.column_count for plan in plans}, {3})
+        first_column = sorted(
+            (plan for plan in plans if plan.column_index == 0),
+            key=lambda plan: plan.row_index,
+        )
+        vertical_overlap = (
+            first_column[0].source_box.y2 - first_column[1].source_box.y1
+        )
+        self.assertLessEqual(vertical_overlap, 160)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -64,6 +65,47 @@ def _line_centers(ratio: np.ndarray, minimum_ratio: float) -> list[int]:
     ]
 
 
+def _blank_band_centers(
+    ratio: np.ndarray, maximum_ratio: float, minimum_band: int
+) -> list[int]:
+    """只保留足够长的连续空白带，短空隙通常只是字内或单元格内间距。"""
+
+    return [
+        round((start + end - 1) / 2)
+        for start, end in _runs(ratio <= maximum_ratio)
+        if end - start >= minimum_band
+    ]
+
+
+def _whitespace_centers(
+    ink: np.ndarray, config: TableConfig
+) -> tuple[list[int], list[int]]:
+    """无线表格兜底：扩张文字后，再寻找贯穿整行或整列的长空白带。"""
+
+    binary = ink.astype(np.uint8)
+    horizontal_kernel = max(
+        3, round(ink.shape[1] * config.whitespace_dilate_ratio)
+    )
+    vertical_kernel = max(
+        3, round(ink.shape[0] * config.whitespace_dilate_ratio)
+    )
+    for_rows = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_kernel, 1)),
+    )
+    for_columns = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_kernel)),
+    )
+    rows = _blank_band_centers(
+        for_rows.mean(axis=1), config.whitespace_blank_ratio, config.whitespace_min_band
+    )
+    columns = _blank_band_centers(
+        for_columns.mean(axis=0), config.whitespace_blank_ratio, config.whitespace_min_band
+    )
+    return rows, columns
+
+
 def _local_boundaries(
     line_centers: list[int],
     length: int,
@@ -109,27 +151,34 @@ def detect_grid_structure(
 ) -> GridStructure:
     """检测同时贯穿较大区域的横线和竖线。
 
-    只有横纵两个方向都达到最少线数时才声明逻辑网格可靠。无边框表格、
-    背景噪声很重的扫描件会返回 unavailable，调用方随后使用像素重叠
-    兜底，不会凭不可靠的文字间隙伪造行列坐标。
+    每个方向都先尝试传统长直线；某个方向没有可靠直线时，才对该方向
+    使用长空白带。这样有线表格不会被行列间空白干扰，无线表格仍有兜底。
     """
 
     gray = np.asarray(analysis_image.convert("L"))
     ink = gray < config.grid_white_threshold
     horizontal = _line_centers(ink.mean(axis=1), config.grid_line_min_ratio)
     vertical = _line_centers(ink.mean(axis=0), config.grid_line_min_ratio)
-    if (
-        len(horizontal) < config.grid_min_line_count
-        or len(vertical) < config.grid_min_line_count
-    ):
+    horizontal_lines = len(horizontal) >= config.grid_min_line_count
+    vertical_lines = len(vertical) >= config.grid_min_line_count
+    whitespace_rows, whitespace_columns = _whitespace_centers(ink, config)
+    row_centers = horizontal if horizontal_lines else whitespace_rows
+    column_centers = vertical if vertical_lines else whitespace_columns
+    if not row_centers or not column_centers:
         return GridStructure("unavailable", (), ())
 
-    rows = _local_boundaries(horizontal, analysis_image.height, config.grid_min_cell_size)
-    columns = _local_boundaries(vertical, analysis_image.width, config.grid_min_cell_size)
+    rows = _local_boundaries(row_centers, analysis_image.height, config.grid_min_cell_size)
+    columns = _local_boundaries(column_centers, analysis_image.width, config.grid_min_cell_size)
     if len(rows) < 2 or len(columns) < 2:
         return GridStructure("unavailable", (), ())
+    if horizontal_lines and vertical_lines:
+        source = "ruled-lines"
+    elif horizontal_lines or vertical_lines:
+        source = "hybrid-lines-whitespace"
+    else:
+        source = "whitespace"
     return GridStructure(
-        source="ruled-lines",
+        source=source,
         row_boundaries=_map_boundaries(
             rows, analysis_image.height, source_region.y1, source_region.height
         ),

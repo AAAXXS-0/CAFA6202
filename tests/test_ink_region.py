@@ -2,10 +2,16 @@ import unittest
 
 from PIL import Image, ImageDraw
 
+from afac_pipeline.table.config import TableConfig
+from afac_pipeline.table.detectors import InkTableDetector, create_detector
 from afac_pipeline.table.ink_region import detect_ink_regions
 
 
 class InkRegionTest(unittest.TestCase):
+    def test_auto_detector_uses_model_free_ink_regions(self) -> None:
+        detector = create_detector(TableConfig(detector="auto"))
+        self.assertIsInstance(detector, InkTableDetector)
+
     def test_sparse_trapezoid_text_is_joined_into_complete_region(self) -> None:
         image = Image.new("RGB", (1000, 700), "white")
         draw = ImageDraw.Draw(image)

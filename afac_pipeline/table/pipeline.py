@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 from ..common.cache import ResultCache
 from .config import TableConfig
 from .detectors import (
+    InkTableDetector,
     ProjectionTableDetector,
     create_detector,
     suppress_duplicate_boxes,
@@ -159,7 +160,21 @@ class TablePipeline:
         self.backend.save_crop(image_path, region, analysis_path, scale=scale)
         with Image.open(analysis_path) as source:
             analysis = source.convert("RGB").copy()
-        return detect_grid_structure(analysis, region, self.config)
+        grid = detect_grid_structure(analysis, region, self.config)
+        overlay = analysis.copy()
+        draw = ImageDraw.Draw(overlay)
+        color = (0, 180, 0) if grid.source == "ruled-lines" else (255, 128, 0)
+        for boundary in grid.row_boundaries[1:-1]:
+            y = round((boundary - region.y1) * analysis.height / region.height)
+            draw.line((0, y, analysis.width, y), fill=color, width=2)
+        for boundary in grid.column_boundaries[1:-1]:
+            x = round((boundary - region.x1) * analysis.width / region.width)
+            draw.line((x, 0, x, analysis.height), fill=color, width=2)
+        draw.text((8, 8), grid.source, fill=color)
+        overlay.save(
+            analysis_dir / f"region_{region_index:03d}_boundaries.png"
+        )
+        return grid
 
     def _save_tile(
         self, image_path: Path, output_path: Path, plan: TilePlan,
@@ -197,7 +212,10 @@ class TablePipeline:
             canvas.save(output_path, format="PNG", optimize=True)
 
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
-        image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
+        # 配置摘要进入目录名，切换检测/切片参数后不会与旧 tiles 混在一起。
+        image_dir = self.work_dir / "prepared" / (
+            f"{image_path.stem}_{image_sha256[:12]}_{self.config.digest()[:8]}"
+        )
         tiles_dir = image_dir / "tiles"
         image_dir.mkdir(parents=True, exist_ok=True)
         tiles_dir.mkdir(parents=True, exist_ok=True)
@@ -207,6 +225,8 @@ class TablePipeline:
         preview.save(image_dir / "preview.png", format="PNG", optimize=True)
 
         detected = self._detect_regions(preview, meta)
+        if isinstance(self.detector, InkTableDetector):
+            self.detector.save_debug(preview, image_dir / "ink_detection")
         if not detected:
             # 两套检测都失败时，保守地把整图作为一个区域，保证不漏文件。
             detected = [
@@ -231,8 +251,16 @@ class TablePipeline:
                     self.config.repeat_header_rows, self.config.repeat_stub_columns,
                 )
             if not plans:
-                # 无框表格或单个单元格过大时保留旧像素重叠方案。
-                grid = GridStructure("unavailable", (), ())
+                # 保留“检测到了边界但存在超大单元格”的原因，避免清单把它
+                # 与“完全没有发现边界”混为一谈。
+                fallback_source = (
+                    f"{grid.source}-unplannable"
+                    if grid.available
+                    else "unavailable"
+                )
+                grid = GridStructure(
+                    fallback_source, grid.row_boundaries, grid.column_boundaries
+                )
                 plans = plan_region_tiles(
                     item.box, region_index, self.config.max_vlm_side,
                     self.config.tile_overlap, self.config.single_tile_min_scale,

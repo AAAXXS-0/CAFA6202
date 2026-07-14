@@ -11,9 +11,10 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .config import TableConfig
+from .ink_region import InkRegionResult, density_visualization, detect_ink_regions
 from ..common.models import Box, DetectedBox
 
 
@@ -23,6 +24,70 @@ class TableDetector(ABC):
     @abstractmethod
     def detect(self, preview: Image.Image) -> list[DetectedBox]:
         pass
+
+
+class InkTableDetector(TableDetector):
+    """将低清墨水密度连接成完整表格外轮廓，不依赖任何模型权重。"""
+
+    name = "ink"
+
+    def __init__(self, config: TableConfig):
+        self.config = config
+        self.last_result: InkRegionResult | None = None
+
+    def detect(self, preview: Image.Image) -> list[DetectedBox]:
+        self.last_result = detect_ink_regions(
+            preview,
+            coarse_max_side=self.config.ink_coarse_max_side,
+            ink_threshold=self.config.ink_threshold,
+            minimum_density=self.config.ink_minimum_density,
+            blur_ratio=self.config.ink_blur_ratio,
+            closing_ratio=self.config.ink_closing_ratio,
+            minimum_box_area_ratio=self.config.ink_minimum_box_area_ratio,
+        )
+        return [
+            DetectedBox(
+                region.box,
+                confidence=min(0.99, 0.50 + region.box_area_ratio * 0.50),
+                source=self.name,
+            )
+            for region in self.last_result.regions
+        ]
+
+    def save_debug(self, preview: Image.Image, output_dir: Path) -> None:
+        """保存墨水密度、连通块和多边形轮廓，便于检查错误粘连。"""
+
+        if self.last_result is None:
+            return
+        output_dir.mkdir(parents=True, exist_ok=True)
+        density_visualization(self.last_result.coarse_density).resize(
+            preview.size,
+            Image.Resampling.NEAREST,
+        ).save(output_dir / "ink_density.png")
+        Image.fromarray(255 - self.last_result.connected_mask, mode="L").resize(
+            preview.size,
+            Image.Resampling.NEAREST,
+        ).save(output_dir / "ink_connected.png")
+        overlay = preview.copy()
+        draw = ImageDraw.Draw(overlay)
+        for index, region in enumerate(self.last_result.regions):
+            if len(region.contour) >= 3:
+                draw.line(
+                    [*region.contour, region.contour[0]],
+                    fill=(0, 200, 0),
+                    width=5,
+                )
+            draw.rectangle(
+                (region.box.x1, region.box.y1, region.box.x2, region.box.y2),
+                outline=(255, 0, 0),
+                width=4,
+            )
+            draw.text(
+                (region.box.x1 + 5, region.box.y1 + 5),
+                f"ink-{index + 1}",
+                fill=(255, 0, 0),
+            )
+        overlay.save(output_dir / "ink_contours.png")
 
 
 def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
@@ -177,15 +242,15 @@ def _yolo_available(config: TableConfig) -> bool:
 
 
 def create_detector(config: TableConfig) -> TableDetector:
+    if config.detector in {"auto", "ink"}:
+        return InkTableDetector(config)
     if config.detector == "projection":
         return ProjectionTableDetector(config)
     if config.detector == "yolo":
         if not _yolo_available(config):
             raise RuntimeError("配置要求 YOLO，但 ultralytics 或模型权重不可用")
         return YoloTableDetector(config)
-    if _yolo_available(config):
-        return YoloTableDetector(config)
-    return ProjectionTableDetector(config)
+    raise RuntimeError(f"不支持的图表检测器：{config.detector}")
 
 
 def suppress_duplicate_boxes(boxes: list[DetectedBox], iou_threshold: float = 0.65) -> list[DetectedBox]:

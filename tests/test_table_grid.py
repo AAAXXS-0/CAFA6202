@@ -40,6 +40,26 @@ class TableGridTest(unittest.TestCase):
         self.assertTrue(all(plan.output_width <= 3000 for plan in plans))
         self.assertTrue(all(plan.output_height <= 3000 for plan in plans))
 
+    def test_borderless_table_uses_whitespace_only_after_line_detection_fails(self) -> None:
+        image = Image.new("RGB", (600, 420), "white")
+        draw = ImageDraw.Draw(image)
+        for y in (60, 145, 230, 315):
+            for x in (45, 245, 445):
+                draw.rectangle((x, y, x + 105, y + 24), fill="black")
+        grid = detect_grid_structure(
+            image,
+            Box(0, 0, 600, 420),
+            TableConfig(
+                grid_line_min_ratio=0.8,
+                whitespace_blank_ratio=0.002,
+                whitespace_min_band=8,
+            ),
+        )
+        self.assertTrue(grid.available)
+        self.assertEqual(grid.source, "whitespace")
+        self.assertGreaterEqual(grid.row_count, 4)
+        self.assertGreaterEqual(grid.column_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
