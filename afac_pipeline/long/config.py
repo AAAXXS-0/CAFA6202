@@ -21,7 +21,7 @@ class LongConfig:
     yolo_batch_size: int = 8
     yolo_base_confidence: float = 0.50
     save_yolo_debug: bool = False
-    title_confidence: float = 0.50
+    title_confidence: float = 0.60
     text_confidence: float = 0.50
     other_confidence: float = 0.50
     deduplicate_iou: float = 0.50
@@ -32,7 +32,7 @@ class LongConfig:
     vlm_overlap: int = 200
     safe_cut_search: int = 400
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v2-legacy-yolo-params"
+    pipeline_version: str = "long-v3-title-confidence-060"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:

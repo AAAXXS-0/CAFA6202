@@ -1,0 +1,170 @@
+"""AFAC 2026 一键准备、识别并生成最终 100 行提交 CSV。
+
+直接运行本文件，不需要输入任何命令行参数。API 或网络中断后再次运行即可，
+SQLite 会自动复用已经成功的切片和整图结果。
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+from pathlib import Path
+import sys
+
+from afac_pipeline.common.hashing import discover_images
+from afac_pipeline.common.submission import combine_submissions
+from afac_pipeline.common.vlm_client import FinixDocClient
+from afac_pipeline.long import LongConfig, LongPipeline
+from afac_pipeline.table import TableConfig, TablePipeline
+
+
+项目根目录 = Path(__file__).resolve().parent
+长图输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images"
+图表输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_table_rest_A/images"
+长图配置文件 = 项目根目录 / "afac_pipeline/long/config.example.json"
+图表配置文件 = 项目根目录 / "afac_pipeline/table/config.example.json"
+官方接口说明 = 项目根目录 / "FinixDoc_VL调用.txt"
+官方提交模板 = 项目根目录 / "finix_ab_A_submit_mock.csv"
+输出目录 = 项目根目录 / "outputs/最终提交"
+
+
+def 检查固定文件() -> None:
+    """在耗时处理前检查输入、模型、凭据说明和模板是否齐全。"""
+
+    required = [
+        长图输入目录,
+        图表输入目录,
+        长图配置文件,
+        图表配置文件,
+        官方接口说明,
+        官方提交模板,
+        项目根目录 / "360LayoutAnalysis/general6-8n.pt",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError("缺少一键运行所需文件：\n" + "\n".join(missing))
+
+    long_names = {path.name for path in discover_images(长图输入目录)}
+    table_names = {path.name for path in discover_images(图表输入目录)}
+    with 官方提交模板.open("r", encoding="utf-8-sig", newline="") as file:
+        template_names = {row["file_name"] for row in csv.DictReader(file)}
+    expected = long_names | table_names
+    if long_names & table_names:
+        raise RuntimeError("长图和图表目录存在同名图片，无法安全合并")
+    if expected != template_names:
+        raise RuntimeError(
+            "数据目录与官方模板文件名不一致："
+            f"模板缺少 {sorted(expected - template_names)}；"
+            f"模板多出 {sorted(template_names - expected)}"
+        )
+    print(
+        f"[检查完成] 长图 {len(long_names)} 张，图表 {len(table_names)} 张，"
+        f"模板 {len(template_names)} 行",
+        flush=True,
+    )
+
+
+def 准备清单可复用(manifest_path: Path, config_digest: str, input_dir: Path) -> bool:
+    """只有配置和输入目录都一致时才复用准备清单。"""
+
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        manifest.get("config_digest") == config_digest
+        and Path(manifest.get("input_dir", "")).resolve() == input_dir.resolve()
+    )
+
+
+def 准备长图(config: LongConfig, work_dir: Path) -> Path:
+    manifest = work_dir / "dataset_manifest.json"
+    if 准备清单可复用(manifest, config.digest(), 长图输入目录):
+        print(f"[长图准备] 复用现有清单：{manifest}", flush=True)
+        return manifest
+    print("[长图准备] 配置或清单有变化，开始滑窗检测与二次切块", flush=True)
+    return LongPipeline(config, work_dir).prepare_directory(长图输入目录)
+
+
+def 准备图表(config: TableConfig, work_dir: Path) -> Path:
+    manifest = work_dir / "dataset_manifest.json"
+    if 准备清单可复用(manifest, config.digest(), 图表输入目录):
+        print(f"[图表准备] 复用现有清单：{manifest}", flush=True)
+        return manifest
+    print("[图表准备] 配置或清单有变化，开始检测与切块", flush=True)
+    return TablePipeline(config, work_dir).prepare_directory(图表输入目录)
+
+
+def main() -> int:
+    os.chdir(项目根目录)
+    检查固定文件()
+
+    long_config = LongConfig.from_json(长图配置文件)
+    table_config = TableConfig.from_json(图表配置文件)
+    # 配置摘要进入工作目录名；参数变化时自动使用新目录，不污染旧缓存。
+    work_root = 项目根目录 / "work/正式运行"
+    long_work = work_root / f"长图_{long_config.digest()[:12]}"
+    table_work = work_root / f"图表_{table_config.digest()[:12]}"
+    print(f"[工作目录] 长图：{long_work}", flush=True)
+    print(f"[工作目录] 图表：{table_work}", flush=True)
+    if os.environ.get("AFAC_DRY_RUN") == "1":
+        print("[检查模式] 固定文件、模板、配置和工作目录均正常；不切图、不调用 API", flush=True)
+        return 0
+
+    long_manifest = 准备长图(long_config, long_work)
+    table_manifest = 准备图表(table_config, table_work)
+    user_id = os.environ.get("FINIXDOC_USER_ID", "finixB2002")
+    client = FinixDocClient.from_official_doc(
+        官方接口说明,
+        user_id=user_id,
+        timeout=240,
+        max_retries=2,
+    )
+    输出目录.mkdir(parents=True, exist_ok=True)
+    long_csv = 输出目录 / "长图结果.csv"
+    table_csv = 输出目录 / "图表结果.csv"
+    final_csv = 输出目录 / "finix_ab_A_submit.csv"
+
+    failures: list[str] = []
+    try:
+        print("[长图识别] 开始调用 FinixDoc-VL", flush=True)
+        LongPipeline(long_config, long_work).recognize_dataset(
+            long_manifest, client, long_csv
+        )
+    except Exception as error:  # 保留另一分支继续积累缓存
+        failures.append(f"长图识别失败：{error}")
+        print(f"[长图识别失败] {error}", flush=True)
+
+    try:
+        print("[图表识别] 开始调用 FinixDoc-VL", flush=True)
+        TablePipeline(table_config, table_work).recognize_dataset(
+            table_manifest, client, table_csv
+        )
+    except Exception as error:  # 保留长图已完成的缓存
+        failures.append(f"图表识别失败：{error}")
+        print(f"[图表识别失败] {error}", flush=True)
+
+    if failures:
+        print("\n本轮没有生成最终 CSV。无需清理，稍后重新运行本文件即可续跑：")
+        for failure in failures:
+            print(f"- {failure}")
+        return 1
+
+    combine_submissions([long_csv, table_csv], 官方提交模板, final_csv)
+    print(f"\n[全部完成] 最终提交文件：{final_csv}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n用户中断。已成功的切片仍在 SQLite 缓存中，重新运行即可续跑。")
+        raise SystemExit(130)
+    except Exception as error:
+        print(f"\n一键生成失败：{error}", file=sys.stderr)
+        print("修正问题后重新运行本文件即可，已有缓存不会丢失。", file=sys.stderr)
+        raise SystemExit(1)

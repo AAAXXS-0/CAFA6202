@@ -32,6 +32,22 @@ python -m pip install -r requirements.txt
 
 超大图片建议安装系统 `libvips`，否则会自动使用 Pillow，功能不受影响但峰值内存更高。
 
+## 最简单的完整运行方式
+
+无需填写任何路径或 API 参数，直接运行：
+
+```bash
+/usr/bin/python3 一键生成最终CSV.py
+```
+
+也可以执行：
+
+```bash
+./一键生成最终CSV.sh
+```
+
+脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。API 繁忙时稍后再次运行同一个文件即可。
+
 ## 统一命令行
 
 ```bash

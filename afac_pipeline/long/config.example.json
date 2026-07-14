@@ -7,7 +7,7 @@
   "yolo_batch_size": 8,
   "yolo_base_confidence": 0.50,
   "save_yolo_debug": true,
-  "title_confidence": 0.50,
+  "title_confidence": 0.60,
   "text_confidence": 0.50,
   "other_confidence": 0.50,
   "deduplicate_iou": 0.50,
@@ -18,5 +18,5 @@
   "vlm_overlap": 200,
   "safe_cut_search": 400,
   "minimum_part_height": 512,
-  "pipeline_version": "long-v2-legacy-yolo-params"
+  "pipeline_version": "long-v3-title-confidence-060"
 }
