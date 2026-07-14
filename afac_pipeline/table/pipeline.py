@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
+from tempfile import TemporaryDirectory
 
 from ..common.cache import ResultCache
 from .config import TableConfig
@@ -20,6 +21,9 @@ from .detectors import (
 )
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
+from .grid import GridStructure, detect_grid_structure
+from .grid_tiling import plan_grid_tiles
+from .html_merge import HtmlTableMergeError, merge_logical_tiles, normalize_table_response
 from .markdown_merge import MarkdownMergeError, merge_markdown_grid
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
@@ -27,7 +31,7 @@ from .tiling import plan_region_tiles
 from ..common.vlm_client import FinixDocClient
 
 
-PROMPT_VERSION = "table-markdown-v1"
+PROMPT_VERSION = "table-structured-html-v2"
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -43,6 +47,22 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def build_table_prompt(tile: TilePlan) -> str:
     """让每个切片的输出尽量适合确定性矩阵合并。"""
+
+    if tile.tiling_mode == "logical_grid":
+        visible_rows = tile.header_context_rows + tile.logical_row_end - tile.logical_row_start
+        visible_columns = tile.stub_context_columns + tile.logical_column_end - tile.logical_column_start
+        return f"""你正在解析金融文档中的表格切片。
+
+该图片应包含 {visible_rows} 个逻辑行、{visible_columns} 个逻辑列。顶部可能重复表头，左侧可能重复行名列，这些是有意保留的上下文。
+
+要求：
+1. 只识别图片中真实可见的内容，严禁补全被裁掉的行、列或文字。
+2. 只输出一个 HTML <table>；用 <tr>、<th>、<td> 表示原始结构。
+3. 合并单元格必须使用 rowspan/colspan，不能拆成虚构单元格。
+4. 保持行列顺序、数字、小数点、百分号、括号、空单元格和特殊符号。
+5. 不要输出分析、置信度、Markdown 表格或代码围栏。
+
+直接输出 HTML："""
 
     return f"""你正在解析金融文档中的表格切片。
 
@@ -126,6 +146,56 @@ class TablePipeline:
             draw.text((coords[0] + 4, coords[1] + 4), str(index + 1), fill=(255, 0, 0))
         return overlay
 
+    def _analyze_grid(
+        self, image_path: Path, region: Box, region_index: int, image_dir: Path
+    ) -> GridStructure:
+        """从原图区域生成受控尺寸分析图，再把网格坐标映射回原图。"""
+
+        analysis_dir = image_dir / "grid_analysis"
+        analysis_path = analysis_dir / f"region_{region_index:03d}.png"
+        scale = min(
+            1.0, self.config.grid_analysis_max_side / max(region.width, region.height)
+        )
+        self.backend.save_crop(image_path, region, analysis_path, scale=scale)
+        with Image.open(analysis_path) as source:
+            analysis = source.convert("RGB").copy()
+        return detect_grid_structure(analysis, region, self.config)
+
+    def _save_tile(
+        self, image_path: Path, output_path: Path, plan: TilePlan,
+        row_boundaries: tuple[int, ...], column_boundaries: tuple[int, ...],
+    ) -> None:
+        """保存普通裁片，或拼出“左上角 + 表头 + 行名列 + 主体”图片。"""
+
+        if plan.header_context_rows == 0 and plan.stub_context_columns == 0:
+            self.backend.save_crop(image_path, plan.source_box, output_path, plan.scale)
+            return
+        with TemporaryDirectory(dir=output_path.parent) as temporary:
+            temporary_dir = Path(temporary)
+
+            def crop(name: str, box: Box) -> Image.Image:
+                path = temporary_dir / f"{name}.png"
+                self.backend.save_crop(image_path, box, path)
+                with Image.open(path) as source:
+                    return source.convert("RGB").copy()
+
+            body = crop("body", plan.source_box)
+            top_height = row_boundaries[plan.header_context_rows] - row_boundaries[0]
+            left_width = column_boundaries[plan.stub_context_columns] - column_boundaries[0]
+            canvas = Image.new("RGB", (body.width + left_width, body.height + top_height), "white")
+            canvas.paste(body, (left_width, top_height))
+            if top_height:
+                top_box = Box(plan.source_box.x1, row_boundaries[0], plan.source_box.x2, row_boundaries[plan.header_context_rows])
+                canvas.paste(crop("top", top_box), (left_width, 0))
+            if left_width:
+                left_box = Box(column_boundaries[0], plan.source_box.y1, column_boundaries[plan.stub_context_columns], plan.source_box.y2)
+                canvas.paste(crop("left", left_box), (0, top_height))
+            if top_height and left_width:
+                corner_box = Box(column_boundaries[0], row_boundaries[0], column_boundaries[plan.stub_context_columns], row_boundaries[plan.header_context_rows])
+                canvas.paste(crop("corner", corner_box), (0, 0))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            canvas.save(output_path, format="PNG", optimize=True)
+
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
         tiles_dir = image_dir / "tiles"
@@ -152,19 +222,25 @@ class TablePipeline:
 
         regions: list[PreparedRegion] = []
         for region_index, item in enumerate(detected):
-            plans = plan_region_tiles(
-                item.box,
-                region_index=region_index,
-                max_side=self.config.max_vlm_side,
-                overlap=self.config.tile_overlap,
-                single_tile_min_scale=self.config.single_tile_min_scale,
-            )
+            grid = self._analyze_grid(image_path, item.box, region_index, image_dir)
+            plans = []
+            if grid.available:
+                plans = plan_grid_tiles(
+                    item.box, region_index, grid.row_boundaries, grid.column_boundaries,
+                    self.config.max_vlm_side, self.config.single_tile_min_scale,
+                    self.config.repeat_header_rows, self.config.repeat_stub_columns,
+                )
+            if not plans:
+                # 无框表格或单个单元格过大时保留旧像素重叠方案。
+                grid = GridStructure("unavailable", (), ())
+                plans = plan_region_tiles(
+                    item.box, region_index, self.config.max_vlm_side,
+                    self.config.tile_overlap, self.config.single_tile_min_scale,
+                )
             for plan in plans:
-                self.backend.save_crop(
-                    image_path,
-                    plan.source_box,
-                    tiles_dir / plan.file_name,
-                    scale=plan.scale,
+                self._save_tile(
+                    image_path, tiles_dir / plan.file_name, plan,
+                    grid.row_boundaries, grid.column_boundaries,
                 )
             regions.append(
                 PreparedRegion(
@@ -172,11 +248,14 @@ class TablePipeline:
                     box=item.box,
                     detector_source=item.source,
                     tiles=plans,
+                    grid_source=grid.source,
+                    row_boundaries=list(grid.row_boundaries),
+                    column_boundaries=list(grid.column_boundaries),
                 )
             )
 
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
@@ -245,6 +324,13 @@ class TablePipeline:
             output_height=int(raw["output_height"]),
             scale=float(raw["scale"]),
             file_name=str(raw["file_name"]),
+            logical_row_start=int(raw.get("logical_row_start", 0)),
+            logical_row_end=int(raw.get("logical_row_end", 1)),
+            logical_column_start=int(raw.get("logical_column_start", 0)),
+            logical_column_end=int(raw.get("logical_column_end", 1)),
+            header_context_rows=int(raw.get("header_context_rows", 0)),
+            stub_context_columns=int(raw.get("stub_context_columns", 0)),
+            tiling_mode=str(raw.get("tiling_mode", "pixel_overlap")),
         )
 
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
@@ -254,6 +340,7 @@ class TablePipeline:
         completed_tiles = 0
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
+            plans = [self._tile_from_dict(raw) for raw in region["tiles"]]
             response_dir = manifest_path.parent / "responses"
             response_dir.mkdir(parents=True, exist_ok=True)
             for raw_tile in region["tiles"]:
@@ -293,12 +380,40 @@ class TablePipeline:
                 contents[(tile.row_index, tile.column_index)] = markdown
 
             try:
-                region_markdown = (
-                    next(iter(contents.values()))
-                    if len(contents) == 1
-                    else merge_markdown_grid(contents)
-                )
-            except MarkdownMergeError as error:
+                if plans and plans[0].tiling_mode == "logical_grid":
+                    if len(contents) == 1:
+                        region_markdown, actual = normalize_table_response(
+                            next(iter(contents.values()))
+                        )
+                        expected_rows = len(region.get("row_boundaries", [])) - 1
+                        expected_columns = len(region.get("column_boundaries", [])) - 1
+                        quality = {
+                            "logical_rows": expected_rows,
+                            "logical_columns": expected_columns,
+                            "actual_rows": actual["rows"],
+                            "actual_columns": actual["columns"],
+                            "status": "ok" if (
+                                actual["rows"] == expected_rows
+                                and actual["columns"] == expected_columns
+                            ) else "warning",
+                        }
+                    else:
+                        region_markdown, quality = merge_logical_tiles(
+                            contents, plans,
+                            len(region["row_boundaries"]) - 1,
+                            len(region["column_boundaries"]) - 1,
+                        )
+                    _json_dump(
+                        manifest_path.parent / "quality" / f"region_{region['index']:03d}.json",
+                        quality,
+                    )
+                else:
+                    region_markdown = (
+                        next(iter(contents.values()))
+                        if len(contents) == 1
+                        else merge_markdown_grid(contents)
+                    )
+            except (MarkdownMergeError, HtmlTableMergeError) as error:
                 _json_dump(
                     manifest_path.parent / "merge_error.json",
                     {

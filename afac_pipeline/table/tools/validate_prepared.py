@@ -57,15 +57,19 @@ def main() -> None:
     records: list[dict] = []
     tile_sizes: list[tuple[int, int]] = []
     sources: Counter[str] = Counter()
+    grid_sources: Counter[str] = Counter()
+    tiling_modes: Counter[str] = Counter()
     for item in unique_items:
         image_manifest_path = Path(item["image_manifest"])
         image_manifest = load_json(image_manifest_path)
         regions = image_manifest["regions"]
         region_sources = [region["detector_source"] for region in regions]
         sources.update(region_sources)
+        grid_sources.update(region.get("grid_source", "unavailable") for region in regions)
         tile_count = 0
         for region in regions:
             for tile in region["tiles"]:
+                tiling_modes.update([tile.get("tiling_mode", "pixel_overlap")])
                 tile_path = image_manifest_path.parent / "tiles" / tile["file_name"]
                 with Image.open(tile_path) as image:
                     tile_sizes.append(image.size)
@@ -87,6 +91,8 @@ def main() -> None:
         "unique_image_count": dataset["unique_image_count"],
         "duplicate_reuse_count": dataset["duplicate_reuse_count"],
         "detector_sources": dict(sources),
+        "grid_sources": dict(grid_sources),
+        "tiling_modes": dict(tiling_modes),
         "tile_count": len(tile_sizes),
         "max_tile_width": max(width for width, _ in tile_sizes),
         "max_tile_height": max(height for _, height in tile_sizes),

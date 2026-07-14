@@ -113,6 +113,15 @@ class TilePlan:
     output_height: int
     scale: float
     file_name: str
+    # 以下逻辑坐标只由图表结构化切块使用。坐标采用左闭右开区间，
+    # 表示该图片块真正负责识别的表格行列；重复表头和行名列不计入责任区。
+    logical_row_start: int = 0
+    logical_row_end: int = 1
+    logical_column_start: int = 0
+    logical_column_end: int = 1
+    header_context_rows: int = 0
+    stub_context_columns: int = 0
+    tiling_mode: str = "pixel_overlap"
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -126,11 +135,17 @@ class PreparedRegion:
     box: Box
     detector_source: str
     tiles: list[TilePlan] = field(default_factory=list)
+    grid_source: str = "unavailable"
+    row_boundaries: list[int] = field(default_factory=list)
+    column_boundaries: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "index": self.index,
             "box": self.box.to_dict(),
             "detector_source": self.detector_source,
+            "grid_source": self.grid_source,
+            "row_boundaries": self.row_boundaries,
+            "column_boundaries": self.column_boundaries,
             "tiles": [tile.to_dict() for tile in self.tiles],
         }

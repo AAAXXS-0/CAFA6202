@@ -9,9 +9,16 @@
   "tile_overlap": 160,
   "single_tile_min_scale": 0.65,
   "table_box_padding_ratio": 0.015,
+  "grid_analysis_max_side": 2400,
+  "grid_white_threshold": 225,
+  "grid_line_min_ratio": 0.42,
+  "grid_min_line_count": 2,
+  "grid_min_cell_size": 18,
+  "repeat_header_rows": 1,
+  "repeat_stub_columns": 1,
   "projection_threshold": 225,
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v1"
+  "pipeline_version": "table-v2-logical-grid"
 }

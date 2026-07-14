@@ -27,11 +27,18 @@ class TableConfig:
     tile_overlap: int = 160
     single_tile_min_scale: float = 0.65
     table_box_padding_ratio: float = 0.015
+    grid_analysis_max_side: int = 2400
+    grid_white_threshold: int = 225
+    grid_line_min_ratio: float = 0.42
+    grid_min_line_count: int = 2
+    grid_min_cell_size: int = 18
+    repeat_header_rows: int = 1
+    repeat_stub_columns: int = 1
     projection_threshold: int = 225
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v1"
+    pipeline_version: str = "table-v2-logical-grid"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -46,6 +53,16 @@ class TableConfig:
             raise ValueError("tile_overlap 必须小于 max_vlm_side")
         if not 0 < self.single_tile_min_scale <= 1:
             raise ValueError("single_tile_min_scale 必须位于 (0, 1] 内")
+        if not 512 <= self.grid_analysis_max_side <= 4096:
+            raise ValueError("grid_analysis_max_side 应位于 512 到 4096 之间")
+        if not 0 <= self.grid_white_threshold <= 255:
+            raise ValueError("grid_white_threshold 必须位于 0 到 255 之间")
+        if not 0 < self.grid_line_min_ratio <= 1:
+            raise ValueError("grid_line_min_ratio 必须位于 (0, 1] 内")
+        if self.grid_min_line_count < 2 or self.grid_min_cell_size <= 0:
+            raise ValueError("网格线数量和最小单元格尺寸配置不合法")
+        if self.repeat_header_rows < 0 or self.repeat_stub_columns < 0:
+            raise ValueError("重复表头行数和行名列数不能为负数")
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "TableConfig":

@@ -43,6 +43,44 @@ class PreparePipelineTest(unittest.TestCase):
             prepared = json.loads(image_manifest.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(prepared["regions"]), 1)
 
+    def test_prepare_large_grid_builds_repeated_context_tiles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "images"
+            input_dir.mkdir()
+            image = Image.new("RGB", (1000, 1000), "white")
+            draw = ImageDraw.Draw(image)
+            for value in range(0, 1001, 200):
+                coordinate = min(value, 999)
+                draw.line((0, coordinate, 999, coordinate), fill="black", width=3)
+                draw.line((coordinate, 0, coordinate, 999), fill="black", width=3)
+            image.save(input_dir / "grid.png")
+
+            config = TableConfig(
+                backend="pillow", detector="projection",
+                preview_max_side=1000, max_vlm_side=512,
+                single_tile_min_scale=0.65,
+                projection_min_line_ratio=0.5,
+                grid_analysis_max_side=1000,
+                grid_line_min_ratio=0.8,
+            )
+            pipeline = TablePipeline(config, root / "work")
+            dataset = json.loads(
+                pipeline.prepare_directory(input_dir).read_text(encoding="utf-8")
+            )
+            prepared_path = Path(dataset["items"][0]["image_manifest"])
+            prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
+            region = prepared["regions"][0]
+            self.assertEqual(region["grid_source"], "ruled-lines")
+            self.assertTrue(any(tile["header_context_rows"] for tile in region["tiles"]))
+            self.assertTrue(any(tile["stub_context_columns"] for tile in region["tiles"]))
+            for tile in region["tiles"]:
+                tile_path = prepared_path.parent / "tiles" / tile["file_name"]
+                with Image.open(tile_path) as output:
+                    expected = (tile["output_width"], tile["output_height"])
+                    self.assertEqual(output.size, expected)
+                    self.assertLessEqual(max(output.size), 512)
+
 
 if __name__ == "__main__":
     unittest.main()
