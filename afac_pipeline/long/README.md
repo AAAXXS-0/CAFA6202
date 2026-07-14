@@ -36,13 +36,15 @@
 - 窗口高度：2048；
 - 窗口步长：1792；
 - 检测窗口重叠：256；
-- YOLO 输入尺寸：1280；
-- Title 最低置信度：0.20；
-- Text 最低置信度：0.25；
+- YOLO 输入尺寸：640（与 legacy 调用默认值一致）；
+- Title 最低置信度：0.50；
+- Text 最低置信度：0.50；
 - FinixDoc-VL 请求图最大高度：3900；
 - 超长语义段物理重叠：200。
 
 模型标签只使用 `Text、Title、Figure、Table、Equation、Caption`，标题推断不依赖不稳定的 Toc 标签。
+
+YOLO 参数以 legacy 实测有效调用为基线：`imgsz=640、conf=0.5`。曾使用的 `imgsz=1280、conf=0.15` 会产生大量低置信度重叠 Text/Title 框，因此不再作为默认配置。
 
 ## 2. 准备长图
 

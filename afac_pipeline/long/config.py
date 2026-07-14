@@ -17,13 +17,13 @@ class LongConfig:
     yolo_model_path: str = "360LayoutAnalysis/general6-8n.pt"
     window_height: int = 2048
     window_step: int = 1792
-    yolo_imgsz: int = 1280
+    yolo_imgsz: int = 640
     yolo_batch_size: int = 8
-    yolo_base_confidence: float = 0.15
+    yolo_base_confidence: float = 0.50
     save_yolo_debug: bool = False
-    title_confidence: float = 0.20
-    text_confidence: float = 0.25
-    other_confidence: float = 0.25
+    title_confidence: float = 0.50
+    text_confidence: float = 0.50
+    other_confidence: float = 0.50
     deduplicate_iou: float = 0.50
     logical_title_gap_ratio: float = 0.35
     logical_title_width_ratio: float = 0.60
@@ -32,7 +32,7 @@ class LongConfig:
     vlm_overlap: int = 200
     safe_cut_search: int = 400
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v1"
+    pipeline_version: str = "long-v2-legacy-yolo-params"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:

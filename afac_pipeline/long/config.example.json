@@ -3,13 +3,13 @@
   "yolo_model_path": "360LayoutAnalysis/general6-8n.pt",
   "window_height": 2048,
   "window_step": 1792,
-  "yolo_imgsz": 1280,
+  "yolo_imgsz": 640,
   "yolo_batch_size": 8,
-  "yolo_base_confidence": 0.15,
+  "yolo_base_confidence": 0.50,
   "save_yolo_debug": true,
-  "title_confidence": 0.20,
-  "text_confidence": 0.25,
-  "other_confidence": 0.25,
+  "title_confidence": 0.50,
+  "text_confidence": 0.50,
+  "other_confidence": 0.50,
   "deduplicate_iou": 0.50,
   "logical_title_gap_ratio": 0.35,
   "logical_title_width_ratio": 0.60,
@@ -18,5 +18,5 @@
   "vlm_overlap": 200,
   "safe_cut_search": 400,
   "minimum_part_height": 512,
-  "pipeline_version": "long-v1"
+  "pipeline_version": "long-v2-legacy-yolo-params"
 }
