@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-scale", type=float, default=0.20)
     parser.add_argument("--density-scale", type=float, default=0.25)
     parser.add_argument("--analysis-max-side", type=int, default=4096)
+    parser.add_argument("--ink-gray-threshold", type=int, default=225)
     parser.add_argument(
         "--save-intermediates",
         action="store_true",
@@ -342,10 +343,10 @@ def save_table_intermediates(
     ).convert("RGB")
     analysis_image.save(table_directory / "003_实际分析区域原图.png")
     binary_preview(structure_ink).save(
-        table_directory / "004_结构墨水_灰度低于245.png"
+        table_directory / "004_结构墨水.png"
     )
     binary_preview(black_ink).save(
-        table_directory / "005_黑线墨水_灰度低于225.png"
+        table_directory / "005_黑线墨水.png"
     )
     binary_preview(envelope).save(
         table_directory / "006_二维表格包络二值图.png"
@@ -436,7 +437,7 @@ def save_table_intermediates(
         "split_image_size": list(table_image.size),
         "analysis_box_in_split": local_box.to_dict(),
         "analysis_box_in_full_analysis_image": analysis_box.to_dict(),
-        "structure_ink_gray_threshold": 245,
+        "structure_ink_gray_threshold": config.grid_white_threshold,
         "black_ink_gray_threshold": config.grid_white_threshold,
         "black_line_required_ratio": 0.90,
         "white_band_maximum_ink_ratio": config.whitespace_blank_ratio,
@@ -470,6 +471,8 @@ def main() -> None:
         raise ValueError("analysis-scale 必须位于 (0, 1] 内")
     if not 0 < args.density_scale <= 1:
         raise ValueError("density-scale 必须位于 (0, 1] 内")
+    if not 0 <= args.ink_gray_threshold <= 255:
+        raise ValueError("ink-gray-threshold 必须位于 0 到 255 之间")
     with Image.open(args.image) as source:
         original_size = source.size
         analysis_size = (
@@ -486,7 +489,11 @@ def main() -> None:
         )
     preview.save(args.output_dir / "001_原始缩略图.png")
 
-    ink_result = detect_ink_regions(preview, coarse_scale=args.density_scale)
+    ink_result = detect_ink_regions(
+        preview,
+        coarse_scale=args.density_scale,
+        ink_threshold=args.ink_gray_threshold,
+    )
     density = ink_result.coarse_density
     density_visualization(density).resize(preview.size, Image.Resampling.NEAREST).save(
         args.output_dir / "002_墨水密度图.png"
@@ -525,7 +532,7 @@ def main() -> None:
     white_draw = ImageDraw.Draw(white_image)
     choice_draw = ImageDraw.Draw(choice_image)
     config = TableConfig(
-        grid_white_threshold=225,
+        grid_white_threshold=args.ink_gray_threshold,
         whitespace_blank_ratio=0.01,
         whitespace_min_band=1,
         whitespace_dilate_ratio=0.004,
@@ -537,7 +544,7 @@ def main() -> None:
         table_image = preview.crop((box.x1, box.y1, box.x2, box.y2))
         table_image.save(split_directory / f"table_{index:03d}.png")
         gray = np.asarray(table_image.convert("L"))
-        structure_ink = gray < 245
+        structure_ink = gray < args.ink_gray_threshold
         black_ink = gray < config.grid_white_threshold
         local_box = dense_content_box(structure_ink)
         analysis_box = Box(
@@ -660,6 +667,7 @@ def main() -> None:
             "analysis_scale": args.analysis_scale,
             "density_scale_from_analysis": args.density_scale,
             "density_scale_from_original": args.analysis_scale * args.density_scale,
+            "ink_gray_threshold": args.ink_gray_threshold,
             "black_gray_threshold": config.grid_white_threshold,
             "black_line_ratio": 0.90,
             "white_band_ink_ratio": 0.01,
