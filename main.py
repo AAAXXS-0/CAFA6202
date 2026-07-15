@@ -13,7 +13,7 @@ from afac_pipeline.table import TableConfig, TablePipeline
 from afac_pipeline.table.local_ocr import LocalTableRecognizer
 from afac_pipeline.common.local_ocr import CachedLocalOCR, RapidOCREngine
 from afac_pipeline.common.submission import combine_submissions
-from afac_pipeline.common.vlm_client import FinixDocClient
+from afac_pipeline.common.vlm_client import FinixDocClient, MAX_RETRY_COUNT
 
 
 def _add_local_ocr_args(parser: argparse.ArgumentParser) -> None:
@@ -59,7 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run.add_argument("--request-timeout", type=int, default=240)
-    run.add_argument("--max-retries", type=int, default=50)
+    run.add_argument("--max-retries", type=int, default=MAX_RETRY_COUNT)
     run.add_argument("--model", default="FinixDoc-VL")
     run.add_argument("--output-csv", default=Path("outputs/table_submission.csv"), type=Path)
 
@@ -77,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_long.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run_long.add_argument("--request-timeout", type=int, default=240)
-    run_long.add_argument("--max-retries", type=int, default=50)
+    run_long.add_argument("--max-retries", type=int, default=MAX_RETRY_COUNT)
     run_long.add_argument("--model", default="FinixDoc-VL")
     run_long.add_argument("--output-csv", default=Path("outputs/long_submission.csv"), type=Path)
 

@@ -73,7 +73,7 @@ class LongConfig:
     semantic_context_gap: int = 10
     semantic_audit_windows: bool = True
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v7-guarded-ink-toc"
+    pipeline_version: str = "long-v8-whole-toc-request"
 
     def __post_init__(self) -> None:
         if self.strategy not in {"semantic", "legacy"}:

@@ -14,7 +14,11 @@ import sys
 
 from afac_pipeline.common.hashing import discover_images
 from afac_pipeline.common.submission import combine_submissions
-from afac_pipeline.common.vlm_client import FinixDocClient
+from afac_pipeline.common.vlm_client import (
+    FinixDocClient,
+    MAX_RETRY_COUNT,
+    retry_delay_seconds,
+)
 from afac_pipeline.long import LongConfig, LongPipeline
 from afac_pipeline.table import TableConfig, TablePipeline
 
@@ -110,6 +114,8 @@ def main() -> int:
     table_work = work_root / f"图表_{table_config.digest()[:12]}"
     print(f"[工作目录] 长图：{long_work}", flush=True)
     print(f"[工作目录] 图表：{table_work}", flush=True)
+    print(f"[断点缓存] 长图：{long_work / 'cache.sqlite3'}", flush=True)
+    print(f"[断点缓存] 图表：{table_work / 'cache.sqlite3'}", flush=True)
     if os.environ.get("AFAC_DRY_RUN") == "1":
         print("[检查模式] 固定文件、模板、配置和工作目录均正常；不切图、不调用 API", flush=True)
         return 0
@@ -117,7 +123,19 @@ def main() -> int:
     long_manifest = 准备长图(long_config, long_work)
     table_manifest = 准备图表(table_config, table_work)
     user_id = os.environ.get("FINIXDOC_USER_ID", "finixB2002")
-    max_retries = int(os.environ.get("FINIXDOC_MAX_RETRIES", "50"))
+    max_retries = int(
+        os.environ.get("FINIXDOC_MAX_RETRIES", str(MAX_RETRY_COUNT))
+    )
+    if not 0 <= max_retries <= MAX_RETRY_COUNT:
+        raise ValueError(
+            f"FINIXDOC_MAX_RETRIES 必须位于 0 到 {MAX_RETRY_COUNT} 之间"
+        )
+    print(
+        f"[API 重试] 最多 {max_retries} 次；"
+        f"等待从 {retry_delay_seconds(1):.0f}s 开始，按 8²、9²、10²……增长",
+        flush=True,
+    )
+    print("[缓存策略] 每个成功切片立即写入 SQLite；重新运行会跳过已成功切片", flush=True)
     client = FinixDocClient.from_official_doc(
         官方接口说明,
         user_id=user_id,

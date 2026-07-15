@@ -51,5 +51,5 @@
   "semantic_context_gap": 10,
   "semantic_audit_windows": true,
   "minimum_part_height": 512,
-  "pipeline_version": "long-v7-guarded-ink-toc"
+  "pipeline_version": "long-v8-whole-toc-request"
 }

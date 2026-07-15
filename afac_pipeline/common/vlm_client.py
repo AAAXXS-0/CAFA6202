@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import json
-import math
 import mimetypes
 import os
 from pathlib import Path
@@ -22,6 +21,17 @@ import requests
 
 OFFICIAL_PROTOCOL = "official_multipart"
 CHAT_PROTOCOL = "chat_completions"
+RETRY_DELAY_BASE = 8
+MAX_RETRY_COUNT = 15
+
+
+def retry_delay_seconds(retry_number: int) -> float:
+    """第 n 次重试等待 (8+n-1)² 秒：64、81、100……"""
+
+    if retry_number <= 0:
+        raise ValueError("retry_number 必须从 1 开始")
+    value = RETRY_DELAY_BASE + retry_number - 1
+    return float(value * value)
 
 
 class FinixDocTemporaryError(RuntimeError):
@@ -88,7 +98,7 @@ class FinixDocClient:
         model: str = "FinixDoc-VL",
         api_key_env: str = "FINIXDOC_API_KEY",
         timeout: int = 240,
-        max_retries: int = 50,
+        max_retries: int = MAX_RETRY_COUNT,
         *,
         protocol: str = OFFICIAL_PROTOCOL,
         user_id: str | None = None,
@@ -100,8 +110,10 @@ class FinixDocClient:
             raise ValueError("api_url 不能为空")
         if protocol not in {OFFICIAL_PROTOCOL, CHAT_PROTOCOL}:
             raise ValueError(f"不支持的 FinixDoc-VL 协议：{protocol}")
-        if max_retries < 0:
-            raise ValueError("max_retries 不能小于 0")
+        if not 0 <= max_retries <= MAX_RETRY_COUNT:
+            raise ValueError(
+                f"max_retries 必须位于 0 到 {MAX_RETRY_COUNT} 之间"
+            )
         self.api_url = api_url
         self.api_model = model
         self.model = f"{model}@{protocol}"
@@ -124,7 +136,7 @@ class FinixDocClient:
         user_id: str | None = None,
         model: str = "FinixDoc-VL",
         timeout: int = 240,
-        max_retries: int = 50,
+        max_retries: int = MAX_RETRY_COUNT,
     ) -> "FinixDocClient":
         """从官方调用说明读取地址、凭据和全部白名单账号。"""
 
@@ -242,8 +254,9 @@ class FinixDocClient:
     def recognize(self, image_path: Path, prompt: str) -> str:
         """识别图片，并在临时错误后轮换白名单账号重试。
 
-        max_retries 表示首次请求失败后最多再试多少次。第 n 次重试前等待
-        n * log2(n) 秒：第一次立即换账号，后续逐步拉长请求间隔。
+        max_retries 表示首次请求失败后最多再试多少次，硬上限为 15。
+        第 n 次重试前等待 (8+n-1)² 秒：64、81、100……484 秒。
+        每次重试继续轮换白名单账号；成功响应由上层立即写入 SQLite 缓存。
         """
 
         last_error: Exception | None = None
@@ -273,14 +286,14 @@ class FinixDocClient:
                 if retry_number >= self.max_retries:
                     break
                 retry_number += 1
-                delay = retry_number * math.log2(retry_number)
+                delay = retry_delay_seconds(retry_number)
                 next_user = attempt_users[retry_number % len(attempt_users)]
                 current_user_text = active_user or "无 userId"
                 next_user_text = next_user or "无 userId"
                 print(
                     f"[FinixDoc-VL 重试 {retry_number}/{self.max_retries}] "
                     f"{image_path.name}：账号 {current_user_text} 请求失败：{error}；"
-                    f"{delay:.2f} 秒后改用 {next_user_text}",
+                    f"{delay:.0f} 秒后改用 {next_user_text}",
                     flush=True,
                 )
                 if delay > 0:
