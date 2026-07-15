@@ -10,6 +10,7 @@ from afac_pipeline.long.步骤001_数据定义 import DetectionWindow, Heading, 
 from afac_pipeline.long.步骤004_语义标题分析 import analyze_semantic_headings
 from afac_pipeline.long.步骤005_大模型请求打包 import (
     RecognitionPack,
+    _split_range_safely,
     build_semantic_recognition_packs,
     strip_repeated_context_headings,
 )
@@ -237,6 +238,30 @@ class LongSemanticTest(unittest.TestCase):
         )
         self.assertFalse(any(item.level == 2 for item in headings))
         self.assertTrue(debug["fallback_required"])
+
+    def test_fallback_overlap_never_exceeds_available_body_height(self) -> None:
+        config = LongConfig(
+            backend="pillow",
+            adaptive_target_height=3200,
+            adaptive_min_height=2200,
+            max_vlm_height=3900,
+            vlm_overlap=200,
+        )
+        # 3283px 是真实失败样本扣除 H2/H3 标题条后的正文额度。
+        # 密集投影找不到空白，旧代码会在 3200 后再补 100px，得到 3300。
+        ranges = _split_range_safely(
+            0,
+            10000,
+            3283,
+            [0.08] * 10000,
+            [LayoutBlock("body", "Text", Box(0, 0, 600, 10000), 0.9, 0)],
+            config,
+        )
+
+        self.assertTrue(ranges)
+        self.assertTrue(
+            all(second - first <= 3283 for first, second, *_ in ranges)
+        )
 
     def test_long_h2_is_split_by_h3_with_context_chain(self) -> None:
         config = LongConfig(

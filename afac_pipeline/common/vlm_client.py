@@ -62,7 +62,8 @@ def _chat_content(payload: dict[str, Any]) -> str:
         )
     text = _strip_markdown_fence(str(content))
     if not text:
-        raise RuntimeError("FinixDoc-VL 返回了空内容")
+        # 空文本通常是上游模型暂时没有生成结果，并非图片或凭据永久错误。
+        raise FinixDocTemporaryError("FinixDoc-VL 返回了空内容")
     return text
 
 
@@ -71,6 +72,10 @@ def parse_official_response(payload: dict[str, Any]) -> str:
 
     if payload.get("success") is not True:
         message = payload.get("message") or "接口返回 success=false"
+        # 官方网关会把上游模型的临时空响应包装成 success=false。
+        # 这种情况换账号并稍后重试可以恢复，不能与无权限等永久错误混为一谈。
+        if "content is empty" in str(message).lower():
+            raise FinixDocTemporaryError(f"FinixDoc-VL 临时空响应：{message}")
         raise FinixDocPermanentError(f"FinixDoc-VL 业务请求失败：{message}")
 
     outer_result = payload.get("result")

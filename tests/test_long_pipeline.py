@@ -22,6 +22,7 @@ class FakeLongDetector(LongLayoutDetector):
         image_width: int,
         image_height: int,
     ) -> list[LayoutBlock]:
+        self.detect_call_count = getattr(self, "detect_call_count", 0) + 1
         self.window_count = len(windows)
         return [
             LayoutBlock("toc", "Title", Box(160, 100, 440, 150), 0.9, 0),
@@ -71,6 +72,12 @@ class LongPipelineTest(unittest.TestCase):
                     pack["source_box"]["y2"] - pack["source_box"]["y1"],
                     3900,
                 )
+
+            # 同一配置、同一原图且请求图片完整时，第二次运行应直接复用，
+            # 不再重复执行耗时的 YOLO 检测。
+            second_manifest_path = pipeline.prepare_directory(input_dir)
+            self.assertEqual(second_manifest_path, manifest_path)
+            self.assertEqual(detector.detect_call_count, 1)
 
     def test_markdown_overlap_is_removed_only_at_seam(self) -> None:
         left = "第一段\n共同接缝文字"

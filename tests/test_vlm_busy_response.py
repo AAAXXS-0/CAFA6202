@@ -87,6 +87,52 @@ class FinixDocBusyResponseTest(unittest.TestCase):
             [call(64.0), call(81.0)],
         )
 
+    def test_empty_model_content_rotates_user_and_retries(self) -> None:
+        empty = requests.Response()
+        empty.status_code = 200
+        empty.headers["content-type"] = "application/json"
+        empty._content = json.dumps(
+            {
+                "success": False,
+                "message": "direct response content is empty",
+            }
+        ).encode()
+
+        success = requests.Response()
+        success.status_code = 200
+        success.headers["content-type"] = "application/json"
+        success._content = json.dumps(
+            {
+                "success": True,
+                "result": {
+                    "result": json.dumps(
+                        {"choices": [{"message": {"content": "# 重试成功"}}]},
+                        ensure_ascii=False,
+                    )
+                },
+            },
+            ensure_ascii=False,
+        ).encode()
+
+        client = FinixDocClient(
+            "https://example.invalid/api/finix_doc/call_with_file",
+            user_id="finixA1001",
+            user_ids=["finixA1001", "finixB2002"],
+            api_key="test-key",
+            max_retries=1,
+        )
+        with (
+            patch("requests.post", side_effect=[empty, success]) as mocked_post,
+            patch("afac_pipeline.common.vlm_client.time.sleep") as mocked_sleep,
+        ):
+            self.assertEqual(client.recognize(__file__, ""), "# 重试成功")
+
+        self.assertEqual(
+            [item.kwargs["data"]["userId"] for item in mocked_post.call_args_list],
+            ["finixA1001", "finixB2002"],
+        )
+        mocked_sleep.assert_called_once_with(64.0)
+
     def test_parallel_requests_rotate_their_initial_user_ids(self) -> None:
         users = ["finixA1001", "finixB2002", "finixC3003"]
         client = FinixDocClient(

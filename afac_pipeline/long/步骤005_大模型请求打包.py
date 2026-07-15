@@ -224,7 +224,13 @@ def _split_range_safely(
             possible.sort(key=lambda y: (is_protected(y), projection[y], abs(y - target)))
             boundary = possible[0]
             half = min(config.vlm_overlap // 2, maximum_height // 8)
-            current_end = min(end_y, boundary + half)
+            # boundary 后补半个重叠区时仍必须服从正文可用高度。
+            # 否则再拼上 H2/H3 标题条会出现 3900+十几像素的越界。
+            current_end = min(
+                end_y,
+                cursor + maximum_height,
+                boundary + half,
+            )
             next_cursor = max(cursor + 1, boundary - half)
             method = "semantic_fallback_overlap"
         if current_end <= cursor or next_cursor <= cursor:

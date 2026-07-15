@@ -106,8 +106,42 @@ class LongPipeline:
             self.detector = GeneralYoloDetector(self.config)
         return self.detector
 
+    def _find_reusable_manifest(
+        self, manifest_path: Path, image_sha256: str
+    ) -> Path | None:
+        """确认单图预处理产物完整，可安全用于断点续跑。"""
+
+        if not manifest_path.is_file():
+            return None
+        try:
+            manifest = _load_json(manifest_path)
+            if manifest.get("schema_version") != 3:
+                return None
+            if manifest.get("config") != self.config.to_dict():
+                return None
+            if manifest.get("image", {}).get("sha256") != image_sha256:
+                return None
+            request_packs = manifest.get("request_packs")
+            if not isinstance(request_packs, list) or not request_packs:
+                return None
+            request_dir = manifest_path.parent / "vlm_requests"
+            for pack in request_packs:
+                file_name = pack.get("file_name") if isinstance(pack, dict) else None
+                if not file_name or not (request_dir / file_name).is_file():
+                    return None
+        except (OSError, ValueError, TypeError, KeyError):
+            # manifest 损坏或上次只生成了一半时，直接重新预处理。
+            return None
+        return manifest_path
+
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
+        manifest_path = image_dir / "manifest.json"
+        reusable = self._find_reusable_manifest(manifest_path, image_sha256)
+        if reusable is not None:
+            print(f"[长图准备复用] {image_path.name}：请求切块已完整生成", flush=True)
+            return reusable
+
         window_dir = image_dir / "detection_windows"
         request_dir = image_dir / "vlm_requests"
         audit_dir = image_dir / "semantic_audit"
@@ -213,7 +247,6 @@ class LongPipeline:
             "semantic_cutting": semantic_debug,
             "request_packs": [pack.to_dict() for pack in request_packs],
         }
-        manifest_path = image_dir / "manifest.json"
         _dump_json(manifest_path, manifest)
         return manifest_path
 
