@@ -190,6 +190,45 @@ class LongSemanticTest(unittest.TestCase):
             )
         )
 
+    def test_oversized_toc_is_kept_whole_and_resized_once(self) -> None:
+        config = LongConfig(backend="pillow")
+        headings = [
+            Heading(
+                "toc", 1, "semantic_toc", Box(0, 100, 600, 140), None, 1.0,
+                centered=True,
+            ),
+            Heading(
+                "h1", 1, "semantic_h1", Box(80, 4700, 520, 4780), None, 1.0,
+                centered=True,
+            ),
+            Heading("h2", 2, "semantic_h2", Box(20, 4900, 500, 4940), None, 0.9),
+        ]
+        blocks = [
+            LayoutBlock("body", "Text", Box(20, 100, 580, 6000), 0.9, 0)
+        ]
+        packs, debug = build_semantic_recognition_packs(
+            headings,
+            blocks,
+            [0.1] * 6000,
+            600,
+            6000,
+            config,
+        )
+        toc_packs = [
+            item for item in packs if item.semantic_role == "table_of_contents"
+        ]
+
+        self.assertEqual(len(toc_packs), 1)
+        self.assertEqual(toc_packs[0].source_box, Box(0, 100, 600, 4700))
+        self.assertLess(toc_packs[0].body_scale, 1.0)
+        self.assertLessEqual(
+            round(toc_packs[0].source_box.height * toc_packs[0].body_scale),
+            config.max_vlm_height,
+        )
+        self.assertEqual(toc_packs[0].cut_method, "semantic_toc_whole_resize")
+        self.assertEqual(debug["toc_request_count"], 1)
+        self.assertEqual(debug["toc_scaled_request_count"], 1)
+
     def test_no_reliable_h2_requests_real_fallback(self) -> None:
         ordinary = Box(40, 700, 500, 720)
         headings, _, debug = self._analyze(

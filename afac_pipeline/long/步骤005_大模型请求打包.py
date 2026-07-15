@@ -30,6 +30,8 @@ class RecognitionPack:
     visible_heading_ids: tuple[str, ...] = ()
     semantic_role: str = "legacy"
     sequence: int = -1
+    # 原图坐标保持不变，只在生成请求 PNG 时缩放。目录可因此整块送入。
+    body_scale: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -65,6 +67,7 @@ class RecognitionPack:
             ),
             semantic_role=str(raw.get("semantic_role", "legacy")),
             sequence=int(raw.get("sequence", -1)),
+            body_scale=float(raw.get("body_scale", 1.0)),
         )
 
 
@@ -265,15 +268,19 @@ def build_semantic_recognition_packs(
         cut_method: str = "semantic_whole",
         overlap_top: int = 0,
         overlap_bottom: int = 0,
+        body_scale: float = 1.0,
     ) -> None:
         if box.height <= 0:
             return
+        if not 0 < body_scale <= 1:
+            raise ValueError("请求正文缩放比例必须位于 0 到 1 之间")
         index = len(packs)
         context_boxes = tuple(
             _context_box(item, image_width, image_height, config.semantic_title_padding)
             for item in contexts
         )
-        total_height = box.height + sum(item.height for item in context_boxes)
+        total_height = round(box.height * body_scale)
+        total_height += sum(item.height for item in context_boxes)
         total_height += config.semantic_context_gap * len(context_boxes)
         if total_height > config.max_vlm_height:
             raise RuntimeError(
@@ -305,6 +312,7 @@ def build_semantic_recognition_packs(
                 visible_heading_ids=visible,
                 semantic_role=role,
                 sequence=index,
+                body_scale=body_scale,
             )
         )
 
@@ -358,12 +366,24 @@ def build_semantic_recognition_packs(
             for value in projection[: toc_heading.box.y1]
         ):
             append_split_range(0, toc_heading.box.y1, "front_prefix", (), ())
-        append_split_range(
+        toc_box = Box(
+            0,
             toc_heading.box.y1,
+            image_width,
             document_h1.box.y1,
+        )
+        # 目录只有编号和短标题，缩小后仍很清楚。这里保留完整原图范围，
+        # 只缩放最终 PNG，不再套用正文的安全切块逻辑。
+        toc_scale = min(1.0, config.max_vlm_height / toc_box.height)
+        append_pack(
+            toc_box,
             "table_of_contents",
-            (),
-            (),
+            cut_method=(
+                "semantic_toc_whole_resize"
+                if toc_scale < 1.0
+                else "semantic_toc_whole"
+            ),
+            body_scale=toc_scale,
         )
         append_split_range(
             document_h1.box.y1,
@@ -505,6 +525,11 @@ def build_semantic_recognition_packs(
         "fallback_overlap_count": sum(item.overlap_top > 0 for item in packs),
         "toc_request_count": sum(
             item.semantic_role.startswith("table_of_contents") for item in packs
+        ),
+        "toc_scaled_request_count": sum(
+            item.semantic_role.startswith("table_of_contents")
+            and item.body_scale < 1.0
+            for item in packs
         ),
         "sections": section_debug,
     }

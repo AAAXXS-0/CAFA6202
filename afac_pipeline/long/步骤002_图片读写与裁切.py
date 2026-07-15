@@ -68,7 +68,8 @@ def save_recognition_pack_images(
 ) -> None:
     """保存正文块，并把祖先 H2/H3 的原图标题条拼到续块顶部。
 
-    超大原图仍由图像后端负责裁切；最终拼接只打开最高 4096px 的小图片。
+    请求块可通过 body_scale 只缩放输出图片而保留原图坐标；目录整块输入
+    使用这一能力。超大原图仍由图像后端负责裁切，最终只打开小图片。
     ``vlm_request_parts`` 故意保留，方便检查复合请求的每一个来源块。
     """
 
@@ -83,7 +84,7 @@ def save_recognition_pack_images(
     for pack in packs:
         body_path = parts_dir / f"{pack.id}_body.png"
         body_paths[pack.id] = body_path
-        crop_requests.append((pack.source_box, body_path, 1.0))
+        crop_requests.append((pack.source_box, body_path, pack.body_scale))
         for box in pack.context_boxes:
             key = (box.x1, box.y1, box.x2, box.y2)
             if key in context_paths:
