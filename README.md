@@ -20,7 +20,7 @@ AFAC2026_challger/
 
 分支文档：
 
-- [长图分支](afac_pipeline/long/README.md)：固定检测窗口、模型与相对墨迹证据、H2/H3 语义切块、祖先标题上下文和 Markdown 聚合；旧自适应安全切割保留为 legacy。
+- [长图分支](afac_pipeline/long/README.md)：严格 Title 0.60、独立全宽墨迹扫描、排版样式聚类、H2/H3 语义切块和祖先标题上下文；历史标题算法已归档，旧安全切割保留为 legacy。
 - [图表分支](afac_pipeline/table/README.md)：表格检测、缩放/二维切片、Markdown 表格拼接和失败处理。
 
 ## 安装

@@ -1,13 +1,14 @@
-"""融合小模型、墨迹字号和全文顺序，生成保守的 H2/H3 章节锚点。
+"""独立墨迹扫描、严格模型候选和文档内排版样式聚类。
 
-本模块不把整段 H2 再送入小模型。general6 始终只处理固定检测窗口；这里
-读取已经映射回原图的版面框，并在窗口小图中测量标题与正文的相对墨迹行高。
-所有阈值都使用当前文档的相对量，不按测试图片文件名或绝对坐标写特殊规则。
+YOLO 与墨迹是两条真正独立的证据链：YOLO 只提供达到 Title 正式阈值的
+候选框；墨迹扫描直接读取每个检测窗口的完整责任区，不依赖任何 YOLO 框。
+两者只在标题样式聚类阶段汇合。没有可靠 H2 时返回空 H2，让请求规划明确
+回退 legacy，而不是从低分候选中强制制造章节边界。
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -17,135 +18,395 @@ from PIL import Image, ImageDraw
 
 from .config import LongConfig
 from .步骤001_数据定义 import DetectionWindow, Heading, LayoutBlock
-from .工具.工具004_旧标题层级分析 import (
-    group_consecutive_titles,
-    infer_heading_hierarchy,
-    is_centered,
-)
+from ..common.models import Box
 
 
 @dataclass(frozen=True)
-class HeadingEvidence:
-    """一个逻辑标题的可审计证据。
+class InkLine:
+    """不依赖小模型、从窗口完整墨迹中检测出的一条视觉文字行。"""
 
-    numbering_hint 暂时为空：准备阶段默认不加载 OCR。后续若接入标题专用 OCR，
-    可在不改变层级接口的前提下补入编号证据。
-    """
+    id: str
+    box: Box
+    ink_density: float
+    gap_above: int = 0
+    gap_below: int = 0
 
-    title_id: str
+    @property
+    def height(self) -> int:
+        return self.box.height
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["box"] = self.box.to_dict()
+        return result
+
+
+@dataclass(frozen=True)
+class TitleEvidence:
+    """一个模型标题组或墨迹独立候选的全部审计信息。"""
+
+    candidate_id: str
+    source: str
     member_ids: tuple[str, ...]
-    y1: int
-    y2: int
+    box: Box
     model_confidence: float
+    matched_ink_line_ids: tuple[str, ...]
     ink_line_height: float
     body_line_height: float
-    text_height_ratio: float
-    left_prominence: float
+    height_ratio: float
+    whitespace_ratio: float
     centered: bool
-    consecutive_run_start: bool
-    baseline_level: int | None
-    baseline_role: str | None
-    numbering_hint: str | None
-    score_model: float
-    score_ink: float
-    score_left: float
-    score_sequence: float
-    score_baseline: float
-    h2_score: float
-    final_level: int
-    final_confidence: float
-    used_as_h2_boundary: bool
+    strict_model_support: bool
+    independent_ink_support: bool
+    eligible_for_style: bool
+    style_id: str | None = None
+    style_rank: int | None = None
+    final_heading_id: str | None = None
+    final_level: int | None = None
+    used_as_h2_boundary: bool = False
+    rejection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["member_ids"] = list(self.member_ids)
+        result["matched_ink_line_ids"] = list(self.matched_ink_line_ids)
+        result["box"] = self.box.to_dict()
         return result
 
 
-def _active_line_heights(
-    gray: Image.Image,
-    *,
-    ink_threshold: int,
-    active_row_ratio: float,
-) -> list[int]:
-    """从局部灰度图中估算每一行真实文字的墨迹高度。"""
+@dataclass(frozen=True)
+class HeadingStyle:
+    id: str
+    candidate_ids: tuple[str, ...]
+    median_height_ratio: float
+    median_left_ratio: float
+    median_model_confidence: float
+    median_whitespace_ratio: float
+    model_supported_count: int
+    ink_only_count: int
+    centered_count: int
+    rank: int = -1
+    selected_as_h2: bool = False
 
-    pixels = np.asarray(gray, dtype=np.uint8)
-    if pixels.ndim != 2 or pixels.size == 0:
-        return []
-    active = np.mean(pixels < ink_threshold, axis=1) >= active_row_ratio
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["candidate_ids"] = list(self.candidate_ids)
+        return result
+
+
+def _active_bands(active: np.ndarray, maximum_gap: int) -> list[tuple[int, int]]:
     bands: list[tuple[int, int]] = []
     start: int | None = None
-    # 允许抗锯齿造成的一像素断口，但不把两行正文合并成一个大黑块。
     last_active = -10
     for index, value in enumerate(active):
         if bool(value):
             if start is None:
                 start = index
             last_active = index
-        elif start is not None and index - last_active > 1:
+        elif start is not None and index - last_active > maximum_gap:
             bands.append((start, last_active + 1))
             start = None
     if start is not None:
         bands.append((start, last_active + 1))
-    return [end - start for start, end in bands if end > start]
+    return bands
 
 
-def measure_layout_ink(
-    blocks: list[LayoutBlock],
+def scan_independent_ink_lines(
     window_paths: list[Path],
     windows: list[DetectionWindow],
+    image_width: int,
     config: LongConfig,
-) -> tuple[dict[str, float], float]:
-    """按窗口一次解码，测量 Title/Text 框中的实际墨迹行高。"""
+) -> tuple[list[InkLine], float]:
+    """扫描窗口整幅墨迹，并用 ownership 保证每条原图文字行只保留一次。"""
 
-    by_window: dict[int, list[LayoutBlock]] = {}
-    for block in blocks:
-        if block.label not in {"Title", "Text"}:
-            continue
-        if block.label == "Title" or block.confidence >= config.text_confidence:
-            by_window.setdefault(block.source_window, []).append(block)
-
-    path_by_index = {window.index: path for path, window in zip(window_paths, windows)}
-    window_by_index = {window.index: window for window in windows}
-    measurements: dict[str, float] = {}
-    body_lines: list[int] = []
-    for window_index, current_blocks in by_window.items():
-        path = path_by_index.get(window_index)
-        window = window_by_index.get(window_index)
-        if path is None or window is None:
-            continue
+    if len(window_paths) != len(windows):
+        raise ValueError("检测窗口图片和窗口元数据数量不一致")
+    lines: list[InkLine] = []
+    for path, window in zip(window_paths, windows):
         with Image.open(path) as source:
-            gray = source.convert("L")
-            for block in current_blocks:
-                x1 = max(0, block.box.x1)
-                x2 = min(gray.width, block.box.x2)
-                y1 = max(0, block.box.y1 - window.start_y)
-                y2 = min(gray.height, block.box.y2 - window.start_y)
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                heights = _active_line_heights(
-                    gray.crop((x1, y1, x2, y2)),
-                    ink_threshold=config.semantic_ink_threshold,
-                    active_row_ratio=config.semantic_active_row_ratio,
+            gray = np.asarray(source.convert("L"), dtype=np.uint8)
+        ink = gray < config.semantic_ink_threshold
+        active = (
+            np.mean(ink, axis=1)
+            >= config.semantic_full_width_active_ratio
+        )
+        for local_y1, local_y2 in _active_bands(
+            active, config.semantic_line_merge_gap
+        ):
+            height = local_y2 - local_y1
+            if height < config.semantic_min_ink_line_height:
+                continue
+            global_y1 = window.start_y + local_y1
+            global_y2 = window.start_y + local_y2
+            center_y = (global_y1 + global_y2) / 2
+            if not (
+                window.ownership_start_y
+                <= center_y
+                < window.ownership_end_y
+            ):
+                continue
+            band = ink[local_y1:local_y2]
+            columns = np.flatnonzero(np.any(band, axis=0))
+            if not len(columns):
+                continue
+            x1 = int(columns[0])
+            x2 = int(columns[-1]) + 1
+            if x2 - x1 < image_width * config.semantic_min_ink_width_ratio:
+                continue
+            lines.append(
+                InkLine(
+                    id=f"ink_{len(lines):05d}",
+                    box=Box(x1, global_y1, x2, global_y2),
+                    ink_density=float(np.mean(band)),
                 )
-                if not heights:
-                    continue
-                value = float(median(heights))
-                measurements[block.id] = value
-                if block.label == "Text":
-                    body_lines.extend(heights)
+            )
 
-    if body_lines:
-        body_height = float(median(body_lines))
-    else:
-        title_values = list(measurements.values())
-        body_height = float(median(title_values)) if title_values else 1.0
-    return measurements, max(1.0, body_height)
+    lines.sort(key=lambda item: (item.box.y1, item.box.x1))
+    with_gaps: list[InkLine] = []
+    for index, line in enumerate(lines):
+        previous_end = lines[index - 1].box.y2 if index else 0
+        next_start = lines[index + 1].box.y1 if index + 1 < len(lines) else line.box.y2
+        with_gaps.append(
+            replace(
+                line,
+                gap_above=max(0, line.box.y1 - previous_end),
+                gap_below=max(0, next_start - line.box.y2),
+            )
+        )
+    if not with_gaps:
+        return [], 1.0
+    # 标题只占少数，全部视觉行高度的中位数比依赖 Text 框更稳定。
+    body_height = float(median(line.height for line in with_gaps))
+    return with_gaps, max(1.0, body_height)
 
 
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))
+def _axis_overlap(first1: int, first2: int, second1: int, second2: int) -> int:
+    return max(0, min(first2, second2) - max(first1, second1))
+
+
+def _union_box(blocks: list[LayoutBlock]) -> Box:
+    return Box(
+        min(item.box.x1 for item in blocks),
+        min(item.box.y1 for item in blocks),
+        max(item.box.x2 for item in blocks),
+        max(item.box.y2 for item in blocks),
+    )
+
+
+def _strict_title_groups(
+    blocks: list[LayoutBlock], body_height: float, config: LongConfig
+) -> list[list[LayoutBlock]]:
+    """严格执行 Title 0.60，并只合并高度/横向范围都很相近的多行标题。"""
+
+    titles = sorted(
+        (
+            item
+            for item in blocks
+            if item.label == "Title"
+            and item.confidence >= config.title_confidence
+        ),
+        key=lambda item: (item.box.y1, item.box.x1),
+    )
+    groups: list[list[LayoutBlock]] = []
+    for title in titles:
+        if not groups:
+            groups.append([title])
+            continue
+        previous = groups[-1][-1]
+        gap = title.box.y1 - previous.box.y2
+        horizontal = _axis_overlap(
+            title.box.x1, title.box.x2, previous.box.x1, previous.box.x2
+        )
+        horizontal_ratio = horizontal / max(
+            1, min(title.box.width, previous.box.width)
+        )
+        height_ratio = min(title.box.height, previous.box.height) / max(
+            1, max(title.box.height, previous.box.height)
+        )
+        if (
+            0 <= gap <= body_height * config.semantic_multiline_gap_ratio
+            and horizontal_ratio >= config.semantic_multiline_overlap_ratio
+            and height_ratio >= 0.65
+        ):
+            groups[-1].append(title)
+        else:
+            groups.append([title])
+    return groups
+
+
+def _is_centered(box: Box, image_width: int, config: LongConfig) -> bool:
+    if box.width > image_width * config.semantic_center_max_width_ratio:
+        return False
+    left = box.x1
+    right = image_width - box.x2
+    return abs(left - right) <= image_width * config.center_tolerance_ratio
+
+
+def _matching_ink_lines(
+    box: Box, lines: list[InkLine], body_height: float
+) -> list[InkLine]:
+    candidates: list[tuple[float, InkLine]] = []
+    for line in lines:
+        if line.box.y1 > box.y2 + body_height or line.box.y2 < box.y1 - body_height:
+            continue
+        overlap = _axis_overlap(box.y1, box.y2, line.box.y1, line.box.y2)
+        distance = abs((box.y1 + box.y2) / 2 - (line.box.y1 + line.box.y2) / 2)
+        if overlap > 0 or distance <= body_height:
+            candidates.append((distance, line))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: item[0])
+    nearest = candidates[0][0]
+    return [line for distance, line in candidates if distance <= nearest + body_height * 0.35]
+
+
+def _initial_candidates(
+    blocks: list[LayoutBlock],
+    lines: list[InkLine],
+    body_height: float,
+    image_width: int,
+    config: LongConfig,
+) -> list[TitleEvidence]:
+    candidates: list[TitleEvidence] = []
+    matched_ink_ids: set[str] = set()
+    for index, group in enumerate(_strict_title_groups(blocks, body_height, config)):
+        box = _union_box(group)
+        matched = _matching_ink_lines(box, lines, body_height)
+        evidence_box = (
+            Box(
+                min([box.x1, *[item.box.x1 for item in matched]]),
+                min([box.y1, *[item.box.y1 for item in matched]]),
+                max([box.x2, *[item.box.x2 for item in matched]]),
+                max([box.y2, *[item.box.y2 for item in matched]]),
+            )
+            if matched else box
+        )
+        matched_ink_ids.update(item.id for item in matched)
+        line_height = (
+            float(median(item.height for item in matched))
+            if matched
+            else 0.0
+        )
+        ratio = line_height / body_height if line_height else 0.0
+        whitespace = (
+            float(median((item.gap_above + item.gap_below) / body_height for item in matched))
+            if matched
+            else 0.0
+        )
+        eligible = bool(matched and ratio >= config.semantic_model_title_min_ratio)
+        candidates.append(
+            TitleEvidence(
+                candidate_id=f"model_title_{index:04d}",
+                source="model",
+                member_ids=tuple(item.id for item in group),
+                box=evidence_box,
+                model_confidence=sum(item.confidence for item in group) / len(group),
+                matched_ink_line_ids=tuple(item.id for item in matched),
+                ink_line_height=line_height,
+                body_line_height=body_height,
+                height_ratio=ratio,
+                whitespace_ratio=whitespace,
+                centered=_is_centered(evidence_box, image_width, config),
+                strict_model_support=True,
+                independent_ink_support=bool(matched),
+                eligible_for_style=eligible,
+                rejection_reason=(
+                    None
+                    if eligible
+                    else "未匹配到独立墨迹行或字号与正文过于接近"
+                ),
+            )
+        )
+
+    # 墨迹只在非常显著且上下有额外留白时独立提出候选，避免普通粗体正文
+    # 大量进入标题树。与模型候选已匹配的墨迹行不重复创建。
+    for line in lines:
+        if line.id in matched_ink_ids:
+            continue
+        ratio = line.height / body_height
+        whitespace = (line.gap_above + line.gap_below) / body_height
+        if (
+            ratio < config.semantic_ink_only_title_ratio
+            or whitespace < config.semantic_ink_only_min_whitespace_ratio
+        ):
+            continue
+        candidates.append(
+            TitleEvidence(
+                candidate_id=f"ink_title_{line.id}",
+                source="ink",
+                member_ids=(),
+                box=line.box,
+                model_confidence=0.0,
+                matched_ink_line_ids=(line.id,),
+                ink_line_height=float(line.height),
+                body_line_height=body_height,
+                height_ratio=ratio,
+                whitespace_ratio=whitespace,
+                centered=_is_centered(line.box, image_width, config),
+                strict_model_support=False,
+                independent_ink_support=True,
+                eligible_for_style=True,
+            )
+        )
+    return sorted(candidates, key=lambda item: (item.box.y1, item.box.x1))
+
+
+def _cluster_candidates(
+    candidates: list[TitleEvidence], image_width: int, config: LongConfig
+) -> tuple[list[HeadingStyle], dict[str, str]]:
+    eligible = [item for item in candidates if item.eligible_for_style]
+    groups: list[list[TitleEvidence]] = []
+    for candidate in sorted(
+        eligible, key=lambda item: (-item.height_ratio, item.box.x1, item.box.y1)
+    ):
+        best_index: int | None = None
+        best_distance = float("inf")
+        for index, group in enumerate(groups):
+            height = float(median(item.height_ratio for item in group))
+            left = float(median(item.box.x1 / image_width for item in group))
+            height_distance = abs(candidate.height_ratio - height) / max(height, 1e-6)
+            left_distance = abs(candidate.box.x1 / image_width - left)
+            if (
+                height_distance <= config.semantic_style_height_tolerance
+                and left_distance <= config.semantic_style_indent_tolerance
+            ):
+                distance = height_distance + left_distance
+                if distance < best_distance:
+                    best_index = index
+                    best_distance = distance
+        if best_index is None:
+            groups.append([candidate])
+        else:
+            groups[best_index].append(candidate)
+
+    styles: list[HeadingStyle] = []
+    assignment: dict[str, str] = {}
+    ordered = sorted(
+        groups,
+        key=lambda group: (
+            -median(item.height_ratio for item in group),
+            median(item.box.x1 / image_width for item in group),
+        ),
+    )
+    for rank, group in enumerate(ordered):
+        style_id = f"style_{rank:02d}"
+        for item in group:
+            assignment[item.candidate_id] = style_id
+        styles.append(
+            HeadingStyle(
+                id=style_id,
+                candidate_ids=tuple(item.candidate_id for item in group),
+                median_height_ratio=float(median(item.height_ratio for item in group)),
+                median_left_ratio=float(median(item.box.x1 / image_width for item in group)),
+                median_model_confidence=float(median(item.model_confidence for item in group)),
+                median_whitespace_ratio=float(median(item.whitespace_ratio for item in group)),
+                model_supported_count=sum(item.strict_model_support for item in group),
+                ink_only_count=sum(not item.strict_model_support for item in group),
+                centered_count=sum(item.centered for item in group),
+                rank=rank,
+            )
+        )
+    return styles, assignment
 
 
 def analyze_semantic_headings(
@@ -154,200 +415,255 @@ def analyze_semantic_headings(
     window_paths: list[Path],
     windows: list[DetectionWindow],
     config: LongConfig,
-) -> tuple[list[Heading], list[HeadingEvidence], dict[str, Any]]:
-    """生成高精度 H2 边界，并把其余正文标题保守地归为 H3 候选。"""
+) -> tuple[list[Heading], list[TitleEvidence], dict[str, Any]]:
+    """按排版样式簇选择 H2；没有可信样式时明确返回零个 H2。"""
 
-    logical_titles, baseline = infer_heading_hierarchy(blocks, image_width, config)
-    raw_ink, body_height = measure_layout_ink(blocks, window_paths, windows, config)
-    baseline_by_members = {
-        tuple(item.member_ids): item for item in baseline if item.member_ids
-    }
-    runs = group_consecutive_titles(logical_titles, blocks)
-    run_starts = {run[0].id for run in runs if len(run) >= 2}
-    left_values = [title.box.x1 for title in logical_titles]
-    left_min = min(left_values, default=0)
-    left_max = max(left_values, default=left_min)
-    left_span = max(1, left_max - left_min)
+    lines, body_height = scan_independent_ink_lines(
+        window_paths, windows, image_width, config
+    )
+    candidates = _initial_candidates(
+        blocks, lines, body_height, image_width, config
+    )
+    styles, assignment = _cluster_candidates(candidates, image_width, config)
+    by_id = {item.candidate_id: item for item in candidates}
 
-    provisional: list[dict[str, Any]] = []
-    for title in logical_titles:
-        member_heights = [raw_ink[item] for item in title.member_ids if item in raw_ink]
-        ink_height = float(median(member_heights)) if member_heights else float(title.box.height)
-        height_ratio = ink_height / body_height
-        base = baseline_by_members.get(tuple(title.member_ids))
-        score_model = _clamp01(title.confidence)
-        # 与本文文字相同大小只提供弱证据；达到约 1.8 倍时封顶。
-        score_ink = _clamp01((height_ratio - 0.9) / 0.9)
-        score_left = _clamp01(1.0 - (title.box.x1 - left_min) / left_span)
-        score_sequence = 1.0 if title.id in run_starts else 0.0
-        score_baseline = 1.0 if base is not None and base.level == 2 else 0.0
-        h2_score = (
-            0.25 * score_model
-            + 0.20 * score_ink
-            + 0.15 * score_left
-            + 0.20 * score_sequence
-            + 0.20 * score_baseline
+    eligible_h2_styles = []
+    for style in styles:
+        members = [by_id[item] for item in style.candidate_ids]
+        non_centered = [item for item in members if not item.centered]
+        if not non_centered:
+            continue
+        if style.median_height_ratio < config.semantic_min_heading_ratio:
+            continue
+        has_model = any(item.strict_model_support for item in non_centered)
+        has_strong_ink = any(
+            item.height_ratio >= config.semantic_ink_only_title_ratio
+            and item.whitespace_ratio >= config.semantic_ink_only_min_whitespace_ratio
+            for item in non_centered
         )
-        provisional.append(
-            {
-                "title": title,
-                "base": base,
-                "ink_height": ink_height,
-                "height_ratio": height_ratio,
-                "score_model": score_model,
-                "score_ink": score_ink,
-                "score_left": score_left,
-                "score_sequence": score_sequence,
-                "score_baseline": score_baseline,
-                "h2_score": h2_score,
-            }
-        )
+        if has_model or has_strong_ink:
+            eligible_h2_styles.append(style)
 
-    # H1/目录标题沿用已经验证过的居中规则。语义切块只改变正文 H2/H3。
-    fixed = [item for item in baseline if item.level == 1]
-    body_h1 = next((item for item in fixed if item.role == "body_h1"), None)
-    body_start = body_h1.box.y2 if body_h1 is not None else 0
-    body_items = [item for item in provisional if item["title"].box.y1 >= body_start]
-    selected_h2 = {
-        item["title"].id
-        for item in body_items
-        if item["h2_score"] >= config.semantic_h2_min_score
-        and not is_centered(
-            item["title"].box, image_width, config.center_tolerance_ratio
+    selected_style_ids: set[str] = set()
+    if eligible_h2_styles:
+        best = max(
+            eligible_h2_styles,
+            key=lambda item: (
+                item.median_height_ratio,
+                -item.median_left_ratio,
+                item.model_supported_count,
+            ),
         )
-    }
-    # 完全没有达到阈值时，选择最强的非居中候选作为唯一保守边界；如果连
-    # 候选也没有，调用方会自动退回 legacy 自适应安全切割。
-    if not selected_h2:
-        non_centered = [
-            item
-            for item in body_items
-            if not is_centered(
-                item["title"].box, image_width, config.center_tolerance_ratio
+        selected_style_ids = {
+            item.id
+            for item in eligible_h2_styles
+            if (
+                abs(item.median_height_ratio - best.median_height_ratio)
+                / best.median_height_ratio
+                <= config.semantic_h2_cluster_height_tolerance
+                and item.median_left_ratio
+                <= best.median_left_ratio + config.semantic_style_indent_tolerance
             )
+        }
+        styles = [
+            replace(item, selected_as_h2=item.id in selected_style_ids)
+            for item in styles
         ]
-        if non_centered:
-            selected_h2.add(max(non_centered, key=lambda item: item["h2_score"])["title"].id)
 
-    headings = list(fixed)
-    evidence: list[HeadingEvidence] = []
-    current_h2: str | None = None
-    h2_index = 0
-    h3_index = 0
-    for item in body_items:
-        title = item["title"]
-        base = item["base"]
-        centered = is_centered(
-            title.box, image_width, config.center_tolerance_ratio
+    h2_candidates = [
+        item
+        for item in candidates
+        if item.eligible_for_style
+        and assignment.get(item.candidate_id) in selected_style_ids
+        and not item.centered
+    ]
+    first_h2_y = min((item.box.y1 for item in h2_candidates), default=10**18)
+    subordinate_style_ids = [
+        style.id
+        for style in styles
+        if style.id not in selected_style_ids
+        and style.median_height_ratio >= config.semantic_model_title_min_ratio
+        and any(
+            not by_id[candidate_id].centered
+            and by_id[candidate_id].box.y1 >= first_h2_y
+            for candidate_id in style.candidate_ids
         )
-        if title.id in selected_h2:
+    ]
+    subordinate_level = {
+        style_id: min(4, 3 + index)
+        for index, style_id in enumerate(subordinate_style_ids)
+    }
+
+    headings: list[Heading] = []
+    updated: list[TitleEvidence] = []
+    current_h2: str | None = None
+    current_h3: str | None = None
+    counters = {1: 0, 2: 0, 3: 0, 4: 0}
+    for item in candidates:
+        style_id = assignment.get(item.candidate_id)
+        level: int | None = None
+        parent_id: str | None = None
+        role = "style_candidate"
+        if (
+            item.centered
+            and item.box.y1 < first_h2_y
+            and item.height_ratio >= config.semantic_min_heading_ratio
+        ):
+            level = 1
+            role = "semantic_h1"
+        elif style_id in selected_style_ids and not item.centered:
             level = 2
             role = "semantic_h2"
-            heading_id = f"semantic_h2_{h2_index:04d}"
-            parent_id = body_h1.id if body_h1 is not None else None
-            current_h2 = heading_id
-            h2_index += 1
-            final_confidence = item["h2_score"]
-        else:
-            level = 3
-            role = "semantic_h3_candidate"
-            heading_id = f"semantic_h3_{h3_index:04d}"
-            parent_id = current_h2
-            h3_index += 1
-            final_confidence = 1.0 - item["h2_score"]
-        headings.append(
-            Heading(
-                id=heading_id,
-                level=level,
-                role=role,
-                box=title.box,
-                parent_id=parent_id,
-                confidence=float(final_confidence),
-                centered=centered,
-                member_ids=title.member_ids,
+        elif (
+            current_h2 is not None
+            and item.eligible_for_style
+            and style_id in subordinate_level
+        ):
+            level = subordinate_level[style_id]
+            role = f"semantic_h{level}_candidate"
+
+        heading_id: str | None = None
+        if level is not None:
+            heading_id = f"semantic_h{level}_{counters[level]:04d}"
+            counters[level] += 1
+            if level == 2:
+                current_h2 = heading_id
+                current_h3 = None
+            elif level == 3:
+                parent_id = current_h2
+                current_h3 = heading_id
+            elif level >= 4:
+                parent_id = current_h3 or current_h2
+            headings.append(
+                Heading(
+                    id=heading_id,
+                    level=level,
+                    role=role,
+                    box=item.box,
+                    parent_id=parent_id,
+                    confidence=(
+                        item.model_confidence
+                        if item.strict_model_support
+                        else min(1.0, item.height_ratio / 2)
+                    ),
+                    centered=item.centered,
+                    member_ids=item.member_ids,
+                )
             )
-        )
-        evidence.append(
-            HeadingEvidence(
-                title_id=heading_id,
-                member_ids=title.member_ids,
-                y1=title.box.y1,
-                y2=title.box.y2,
-                model_confidence=title.confidence,
-                ink_line_height=item["ink_height"],
-                body_line_height=body_height,
-                text_height_ratio=item["height_ratio"],
-                left_prominence=item["score_left"],
-                centered=centered,
-                consecutive_run_start=item["score_sequence"] > 0,
-                baseline_level=base.level if base is not None else None,
-                baseline_role=base.role if base is not None else None,
-                numbering_hint=None,
-                score_model=item["score_model"],
-                score_ink=item["score_ink"],
-                score_left=item["score_left"],
-                score_sequence=item["score_sequence"],
-                score_baseline=item["score_baseline"],
-                h2_score=item["h2_score"],
+        updated.append(
+            replace(
+                item,
+                style_id=style_id,
+                style_rank=next(
+                    (style.rank for style in styles if style.id == style_id),
+                    None,
+                ),
+                final_heading_id=heading_id,
                 final_level=level,
-                final_confidence=float(final_confidence),
                 used_as_h2_boundary=level == 2,
+                rejection_reason=(
+                    item.rejection_reason
+                    if level is not None or item.rejection_reason is not None
+                    else "样式未被选为 H1/H2，且当前没有可归属的上级 H2"
+                ),
             )
         )
 
-    headings.sort(key=lambda item: (item.box.y1, item.level, item.box.x1))
     debug = {
-        "method": "general6+relative-ink+legacy-sequence",
+        "method": "strict-general6+independent-full-width-ink+style-clustering-v2",
         "body_ink_line_height": body_height,
-        "h2_min_score": config.semantic_h2_min_score,
-        "logical_title_count": len(logical_titles),
+        "ink_line_count": len(lines),
+        "strict_model_title_count": sum(item.source == "model" for item in candidates),
+        "ink_only_candidate_count": sum(item.source == "ink" for item in candidates),
+        "eligible_candidate_count": sum(item.eligible_for_style for item in candidates),
+        "h1_count": sum(item.level == 1 for item in headings),
         "h2_count": sum(item.level == 2 for item in headings),
-        "h3_candidate_count": sum(item.level == 3 for item in headings),
-        "numbering_note": (
-            "准备阶段默认不加载 OCR；标题编号由 FinixDoc-VL 在请求块内判断，"
-            "本字段为以后标题专用 OCR 预留。"
-        ),
-        "evidence": [item.to_dict() for item in evidence],
+        "h3_count": sum(item.level == 3 for item in headings),
+        "h4_count": sum(item.level == 4 for item in headings),
+        "selected_h2_style_ids": sorted(selected_style_ids),
+        "fallback_required": not any(item.level == 2 for item in headings),
+        "parameters": {
+            "title_confidence": config.title_confidence,
+            "ink_threshold": config.semantic_ink_threshold,
+            "full_width_active_ratio": config.semantic_full_width_active_ratio,
+            "model_title_min_ratio": config.semantic_model_title_min_ratio,
+            "ink_only_title_ratio": config.semantic_ink_only_title_ratio,
+            "style_height_tolerance": config.semantic_style_height_tolerance,
+            "style_indent_tolerance": config.semantic_style_indent_tolerance,
+            "h2_cluster_height_tolerance": config.semantic_h2_cluster_height_tolerance,
+        },
+        "ink_lines": [item.to_dict() for item in lines],
+        "styles": [item.to_dict() for item in styles],
+        "candidates": [item.to_dict() for item in updated],
     }
-    return headings, evidence, debug
+    return sorted(headings, key=lambda item: (item.box.y1, item.level)), updated, debug
 
 
-def save_heading_audit_windows(
+def save_semantic_audit_windows(
     window_paths: list[Path],
     windows: list[DetectionWindow],
+    evidence: list[TitleEvidence],
     headings: list[Heading],
-    evidence: list[HeadingEvidence],
+    debug: dict[str, Any],
     output_dir: Path,
 ) -> None:
-    """把最终层级和分数画回检测窗口，保留可直接肉眼检查的中间产物。"""
+    """分别保存独立墨迹、严格模型候选和最终层级三套窗口图。"""
 
-    score_by_id = {item.title_id: item.h2_score for item in evidence}
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for path, window in zip(window_paths, windows):
-        visible = [
-            item
-            for item in headings
-            if item.box.y2 > window.start_y and item.box.y1 < window.end_y
-        ]
-        if not visible:
-            continue
-        with Image.open(path) as source:
-            image = source.convert("RGB")
-        draw = ImageDraw.Draw(image)
-        for heading in visible:
-            color = {1: "#8a2be2", 2: "#e60000", 3: "#0066ff"}.get(
-                heading.level, "#00aa55"
-            )
-            box = (
-                heading.box.x1,
-                max(0, heading.box.y1 - window.start_y),
-                heading.box.x2,
-                min(image.height, heading.box.y2 - window.start_y),
-            )
-            draw.rectangle(box, outline=color, width=4)
-            score = score_by_id.get(heading.id)
-            label = f"H{heading.level} {heading.id}"
-            if score is not None:
-                label += f" h2={score:.2f}"
-            draw.text((box[0] + 4, max(0, box[1] - 14)), label, fill=color)
-        image.save(output_dir / path.name, format="PNG", compress_level=4)
+    ink_lines = [
+        InkLine(
+            id=str(raw["id"]),
+            box=Box.from_dict(raw["box"]),
+            ink_density=float(raw["ink_density"]),
+            gap_above=int(raw["gap_above"]),
+            gap_below=int(raw["gap_below"]),
+        )
+        for raw in debug.get("ink_lines", [])
+    ]
+    directories = {
+        "ink": output_dir / "004_独立墨迹行窗口图",
+        "model": output_dir / "005_严格模型标题窗口图",
+        "final": output_dir / "007_最终标题层级窗口图",
+    }
+    for path in directories.values():
+        path.mkdir(parents=True, exist_ok=True)
+
+    for window_path, window in zip(window_paths, windows):
+        with Image.open(window_path) as source:
+            base = source.convert("RGB")
+        for mode, target in directories.items():
+            image = base.copy()
+            draw = ImageDraw.Draw(image)
+            if mode == "ink":
+                items = [
+                    (line.box, "#ff8800" if line.height >= debug["body_ink_line_height"] * 1.2 else "#777777", f"ink h={line.height}")
+                    for line in ink_lines
+                ]
+            elif mode == "model":
+                items = [
+                    (item.box, "#ffaa00", f"{item.candidate_id} conf={item.model_confidence:.2f}")
+                    for item in evidence
+                    if item.source == "model"
+                ]
+            else:
+                colors = {1: "#8a2be2", 2: "#e60000", 3: "#0066ff", 4: "#00aa55"}
+                items = [
+                    (item.box, colors.get(item.level, "#333333"), f"H{item.level} {item.id}")
+                    for item in headings
+                ]
+            visible = [
+                (box, color, label)
+                for box, color, label in items
+                if box.y2 > window.start_y and box.y1 < window.end_y
+            ]
+            if not visible:
+                continue
+            for box, color, label in visible:
+                local = (
+                    box.x1,
+                    max(0, box.y1 - window.start_y),
+                    box.x2,
+                    min(image.height, box.y2 - window.start_y),
+                )
+                draw.rectangle(local, outline=color, width=3)
+                draw.text((local[0] + 3, max(0, local[1] - 13)), label, fill=color)
+            image.save(target / window_path.name, format="PNG", compress_level=4)

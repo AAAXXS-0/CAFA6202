@@ -24,7 +24,7 @@ from .步骤002_图片读写与裁切 import (
 )
 from .步骤004_语义标题分析 import (
     analyze_semantic_headings,
-    save_heading_audit_windows,
+    save_semantic_audit_windows,
 )
 from .步骤005_大模型请求打包 import (
     RecognitionPack,
@@ -43,7 +43,7 @@ from ..common.submission import write_submission
 from ..common.vlm_client import FinixDocClient
 
 
-LONG_PROMPT_VERSION = "long-markdown-v4-semantic-h2"
+LONG_PROMPT_VERSION = "long-markdown-v5-independent-ink-style"
 
 
 def _dump_json(path: Path, value: Any) -> None:
@@ -160,15 +160,16 @@ class LongPipeline:
                 meta.height,
                 self.config,
             )
-            _dump_json(audit_dir / "005_标题层级证据.json", heading_debug)
-            _dump_json(audit_dir / "007_请求切块清单.json", semantic_debug)
+            _dump_json(audit_dir / "006_标题样式聚类.json", heading_debug)
+            _dump_json(audit_dir / "008_请求切块清单.json", semantic_debug)
             if self.config.semantic_audit_windows:
-                save_heading_audit_windows(
+                save_semantic_audit_windows(
                     window_paths,
                     windows,
-                    semantic_headings,
                     evidence,
-                    audit_dir / "006_标题层级窗口图",
+                    semantic_headings,
+                    heading_debug,
+                    audit_dir,
                 )
         else:
             request_packs = build_adaptive_recognition_packs(

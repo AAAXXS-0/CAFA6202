@@ -2,7 +2,7 @@ import unittest
 
 from afac_pipeline.long.config import LongConfig
 from afac_pipeline.long.步骤001_数据定义 import LayoutBlock
-from afac_pipeline.long.工具.工具004_旧标题层级分析 import (
+from afac_pipeline.long.归档.连续标题层级_v0 import (
     attach_physical_parts,
     build_semantic_segments,
     infer_heading_hierarchy,

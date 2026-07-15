@@ -11,7 +11,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LongConfig:
-    """固定检测滑窗与自适应最终安全切块参数。"""
+    """固定检测窗口、语义样式分析与最终安全切块参数。"""
 
     strategy: str = "semantic"
     backend: str = "auto"
@@ -28,6 +28,7 @@ class LongConfig:
     cut_protection_confidence: float = 0.25
     cut_protection_padding: int = 16
     deduplicate_iou: float = 0.50
+    # 以下三个字段只供归档算法和本地 OCR 备用线读取。
     logical_title_gap_ratio: float = 0.35
     logical_title_width_ratio: float = 0.60
     center_tolerance_ratio: float = 0.10
@@ -40,17 +41,29 @@ class LongConfig:
     max_vlm_height: int = 3900
     vlm_overlap: int = 200
     safe_cut_search: int = 600
-    # semantic 策略只把高可信 H2 当成真正的章节边界；低可信标题留在
-    # 章节内部交给 FinixDoc-VL 判断，避免一次误切破坏整章结构。
+    # v1 清单兼容字段；v2 不再使用加权 H2 分数。
     semantic_h2_min_score: float = 0.62
     semantic_ink_threshold: int = 225
     semantic_active_row_ratio: float = 0.01
+    semantic_full_width_active_ratio: float = 0.002
+    semantic_line_merge_gap: int = 2
+    semantic_min_ink_line_height: int = 6
+    semantic_min_ink_width_ratio: float = 0.02
+    semantic_multiline_gap_ratio: float = 0.35
+    semantic_multiline_overlap_ratio: float = 0.65
+    semantic_model_title_min_ratio: float = 1.05
+    semantic_ink_only_title_ratio: float = 1.35
+    semantic_ink_only_min_whitespace_ratio: float = 0.60
+    semantic_min_heading_ratio: float = 1.08
+    semantic_style_height_tolerance: float = 0.10
+    semantic_style_indent_tolerance: float = 0.06
+    semantic_h2_cluster_height_tolerance: float = 0.08
+    semantic_center_max_width_ratio: float = 0.55
     semantic_title_padding: int = 12
     semantic_context_gap: int = 10
     semantic_audit_windows: bool = True
-    # 保留旧字段以便读取旧清单；semantic 主流程不再直接使用该值。
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v5-semantic-h2"
+    pipeline_version: str = "long-v6-independent-ink-style"
 
     def __post_init__(self) -> None:
         if self.strategy not in {"semantic", "legacy"}:
@@ -96,6 +109,30 @@ class LongConfig:
             raise ValueError("semantic_ink_threshold 必须位于 0 到 255 之间")
         if not 0 <= self.semantic_active_row_ratio <= 1:
             raise ValueError("semantic_active_row_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_full_width_active_ratio <= 1:
+            raise ValueError("semantic_full_width_active_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_min_ink_width_ratio <= 1:
+            raise ValueError("semantic_min_ink_width_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_multiline_overlap_ratio <= 1:
+            raise ValueError("semantic_multiline_overlap_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_center_max_width_ratio <= 1:
+            raise ValueError("semantic_center_max_width_ratio 必须位于 0 到 1 之间")
+        nonnegative = (
+            self.semantic_multiline_gap_ratio,
+            self.semantic_model_title_min_ratio,
+            self.semantic_ink_only_title_ratio,
+            self.semantic_ink_only_min_whitespace_ratio,
+            self.semantic_min_heading_ratio,
+            self.semantic_style_height_tolerance,
+            self.semantic_style_indent_tolerance,
+            self.semantic_h2_cluster_height_tolerance,
+        )
+        if any(value < 0 for value in nonnegative):
+            raise ValueError("语义墨迹和样式比例参数不能小于 0")
+        if self.semantic_line_merge_gap <= 0:
+            raise ValueError("semantic_line_merge_gap 必须大于 0")
+        if self.semantic_min_ink_line_height <= 0:
+            raise ValueError("semantic_min_ink_line_height 必须大于 0")
         if self.semantic_title_padding < 0 or self.semantic_context_gap < 0:
             raise ValueError("语义标题留白和上下文间隔不能小于 0")
         if not 0 <= self.vlm_overlap < self.adaptive_min_height:

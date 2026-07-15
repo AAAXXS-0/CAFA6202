@@ -13,7 +13,7 @@ from .config import LongConfig
 from .步骤001_数据定义 import Heading, LayoutBlock
 from .步骤005_大模型请求打包 import RecognitionPack
 from .步骤006_全流程调度 import merge_markdown_overlap
-from .工具.工具004_旧标题层级分析 import infer_heading_hierarchy
+from .归档.连续标题层级_v0 import infer_heading_hierarchy
 
 
 def _load_json(path: Path) -> dict[str, Any]:

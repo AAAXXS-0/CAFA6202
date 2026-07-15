@@ -335,7 +335,10 @@ def build_semantic_recognition_packs(
             )
 
     # 文档头部、目录和 H1 不属于任何 H2，仍按空白安全切块完整保留。
-    if h2s[0].box.y1 > 0:
+    if (
+        h2s[0].box.y1 > 0
+        and any(value > config.projection_blank_ratio for value in projection[: h2s[0].box.y1])
+    ):
         append_split_range(0, h2s[0].box.y1, "front_matter", (), ())
 
     section_debug: list[dict[str, Any]] = []
