@@ -25,7 +25,14 @@ from ..common.image_backend import ImageBackend, create_backend
 from .grid import GridStructure, detect_grid_structure
 from .grid_tiling import plan_grid_tiles
 from .html_merge import HtmlTableMergeError, merge_logical_tiles, normalize_table_response
+from .ink_region import density_visualization
 from .markdown_merge import MarkdownMergeError, merge_markdown_grid
+from .v6_structure import (
+    V6RegionResult,
+    detect_v6_grid,
+    detect_v6_regions,
+    detected_boxes,
+)
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
 from .tiling import plan_region_tiles
@@ -90,6 +97,7 @@ class TablePipeline:
         self.backend: ImageBackend = create_backend(config.backend)
         self.detector = create_detector(config)
         self.cache = ResultCache(self.work_dir / "cache.sqlite3")
+        self._last_v6_regions: V6RegionResult | None = None
 
     @staticmethod
     def _map_preview_box(box: Box, preview_width: int, preview_height: int, meta: ImageMeta) -> Box:
@@ -105,6 +113,19 @@ class TablePipeline:
         ).clamp(meta.width, meta.height)
 
     def _detect_regions(self, preview, meta: ImageMeta) -> list[DetectedBox]:
+        if isinstance(self.detector, InkTableDetector):
+            # 默认无模型流程使用 v6。detect_v6_regions 返回的是 20% 分析图
+            # 坐标；这里直接映射回原图，不再额外删除或扩张边缘。
+            self._last_v6_regions = detect_v6_regions(preview, self.config)
+            return [
+                DetectedBox(
+                    self._map_preview_box(item.box, preview.width, preview.height, meta),
+                    label=item.label,
+                    confidence=item.confidence,
+                    source=item.source,
+                )
+                for item in detected_boxes(self._last_v6_regions)
+            ]
         preview_boxes = self.detector.detect(preview)
         # YOLO 在极端表格上可能无框；此时用投影检测兜底，而不是直接丢图。
         if not preview_boxes and self.detector.name != "projection":
@@ -128,6 +149,61 @@ class TablePipeline:
                 )
             )
         return suppress_duplicate_boxes(mapped)
+
+    def _make_detection_preview(
+        self, image_path: Path, meta: ImageMeta, image_dir: Path
+    ) -> Image.Image:
+        """默认 v6 使用固定 20% 分析图；历史检测器仍使用最长边预览。"""
+
+        preview_path = image_dir / "preview.png"
+        if isinstance(self.detector, InkTableDetector):
+            longest = round(max(meta.width, meta.height) * self.config.table_analysis_scale)
+            if longest > self.config.table_analysis_max_side:
+                raise RuntimeError(
+                    f"{image_path.name} 固定缩放后的最长边为 {longest}，超过安全上限 "
+                    f"{self.config.table_analysis_max_side}；请显式调整 table_analysis_scale"
+                )
+            self.backend.save_crop(
+                image_path,
+                Box(0, 0, meta.width, meta.height),
+                preview_path,
+                scale=self.config.table_analysis_scale,
+            )
+            with Image.open(preview_path) as source:
+                return source.convert("RGB").copy()
+        preview = self.backend.make_preview(image_path, self.config.preview_max_side)
+        preview.save(preview_path, format="PNG", optimize=True)
+        return preview
+
+    def _save_v6_detection_debug(self, preview: Image.Image, image_dir: Path) -> None:
+        """保存密度分表带、分表框和最终分析框，方便定位分表错误。"""
+
+        result = self._last_v6_regions
+        if result is None:
+            return
+        output_dir = image_dir / "density_detection"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        density = result.ink_result.coarse_density
+        density_visualization(density).resize(
+            preview.size, Image.Resampling.NEAREST
+        ).save(output_dir / "density.png")
+        overlay = preview.copy()
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        for band in result.horizontal_bands:
+            y1 = round(band.start * preview.height / density.shape[0])
+            y2 = round(band.end * preview.height / density.shape[0])
+            draw.rectangle((0, y1, preview.width, y2), fill=(255, 0, 0, 65))
+        for band in result.vertical_bands:
+            x1 = round(band.start * preview.width / density.shape[1])
+            x2 = round(band.end * preview.width / density.shape[1])
+            draw.rectangle((x1, 0, x2, preview.height), fill=(255, 0, 0, 65))
+        for index, box in enumerate(result.split_boxes):
+            draw.rectangle((box.x1, box.y1, box.x2, box.y2), outline=(0, 80, 255, 255), width=3)
+            draw.text((box.x1 + 4, box.y1 + 4), f"split-{index + 1}", fill=(0, 80, 255, 255))
+        for index, box in enumerate(result.analysis_boxes):
+            draw.rectangle((box.x1, box.y1, box.x2, box.y2), outline=(160, 0, 255, 255), width=3)
+            draw.text((box.x1 + 4, box.y1 + 22), f"table-{index + 1}", fill=(160, 0, 255, 255))
+        overlay.save(output_dir / "split_and_analysis_boxes.png")
 
     @staticmethod
     def _draw_preview_boxes(preview, boxes: list[DetectedBox], meta: ImageMeta):
@@ -154,13 +230,20 @@ class TablePipeline:
 
         analysis_dir = image_dir / "grid_analysis"
         analysis_path = analysis_dir / f"region_{region_index:03d}.png"
-        scale = min(
-            1.0, self.config.grid_analysis_max_side / max(region.width, region.height)
-        )
+        if isinstance(self.detector, InkTableDetector):
+            scale = self.config.table_analysis_scale
+        else:
+            scale = min(
+                1.0, self.config.grid_analysis_max_side / max(region.width, region.height)
+            )
         self.backend.save_crop(image_path, region, analysis_path, scale=scale)
         with Image.open(analysis_path) as source:
             analysis = source.convert("RGB").copy()
-        grid = detect_grid_structure(analysis, region, self.config)
+        diagnostics = None
+        if isinstance(self.detector, InkTableDetector):
+            grid, diagnostics = detect_v6_grid(analysis, region, self.config)
+        else:
+            grid = detect_grid_structure(analysis, region, self.config)
         overlay = analysis.copy()
         draw = ImageDraw.Draw(overlay)
         color = (0, 180, 0) if grid.source == "ruled-lines" else (255, 128, 0)
@@ -174,6 +257,16 @@ class TablePipeline:
         overlay.save(
             analysis_dir / f"region_{region_index:03d}_boundaries.png"
         )
+        if diagnostics is not None:
+            diagnostic_data = diagnostics.to_dict()
+            diagnostic_data.update(
+                {
+                    "analysis_size": list(analysis.size),
+                    "source_region": region.to_dict(),
+                    "grid": grid.to_dict(),
+                }
+            )
+            _json_dump(analysis_dir / f"region_{region_index:03d}_diagnostics.json", diagnostic_data)
         return grid
 
     def _save_tile(
@@ -211,6 +304,98 @@ class TablePipeline:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             canvas.save(output_path, format="PNG", optimize=True)
 
+    @staticmethod
+    def _preview_box(box: Box, preview: Image.Image, meta: ImageMeta) -> Box:
+        """把原图矩形映射到审计预览图。"""
+
+        return Box(
+            round(box.x1 * preview.width / meta.width),
+            round(box.y1 * preview.height / meta.height),
+            round(box.x2 * preview.width / meta.width),
+            round(box.y2 * preview.height / meta.height),
+        ).clamp(preview.width, preview.height)
+
+    def _save_tile_audit(
+        self,
+        preview: Image.Image,
+        meta: ImageMeta,
+        regions: list[PreparedRegion],
+        tiles_dir: Path,
+        image_dir: Path,
+    ) -> dict[str, object]:
+        """生成总览叠加图和真实切块联系图，便于不调用 API 直接验收。"""
+
+        overlay = preview.copy()
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        all_plans: list[TilePlan] = []
+        for region in regions:
+            region_box = self._preview_box(region.box, preview, meta)
+            draw.rectangle(
+                (region_box.x1, region_box.y1, region_box.x2, region_box.y2),
+                outline=(0, 160, 0, 255),
+                width=3,
+            )
+            # 淡色细线表示结构检测得到的所有逻辑边界；红框表示真正送给
+            # 大模型负责识别的主体范围。重复表头/行名列只出现在切块图片中。
+            for boundary in region.row_boundaries[1:-1]:
+                y = round(boundary * preview.height / meta.height)
+                draw.line((region_box.x1, y, region_box.x2, y), fill=(0, 170, 255, 100), width=1)
+            for boundary in region.column_boundaries[1:-1]:
+                x = round(boundary * preview.width / meta.width)
+                draw.line((x, region_box.y1, x, region_box.y2), fill=(0, 170, 255, 100), width=1)
+            for plan in region.tiles:
+                all_plans.append(plan)
+                tile_box = self._preview_box(plan.source_box, preview, meta)
+                draw.rectangle(
+                    (tile_box.x1, tile_box.y1, tile_box.x2, tile_box.y2),
+                    outline=(255, 0, 0, 255),
+                    width=3,
+                )
+                draw.text(
+                    (tile_box.x1 + 3, tile_box.y1 + 3),
+                    f"T{len(all_plans):03d}",
+                    fill=(255, 0, 0, 255),
+                )
+        overlay_path = image_dir / "tile_overlay.png"
+        overlay.save(overlay_path, format="PNG", optimize=True)
+
+        card_width, card_height = 560, 420
+        image_height = 340
+        columns = min(3, max(1, len(all_plans)))
+        rows = max(1, (len(all_plans) + columns - 1) // columns)
+        sheet = Image.new("RGB", (columns * card_width, rows * card_height), "white")
+        sheet_draw = ImageDraw.Draw(sheet)
+        for index, plan in enumerate(all_plans):
+            left = (index % columns) * card_width
+            top = (index // columns) * card_height
+            with Image.open(tiles_dir / plan.file_name) as source:
+                tile = source.convert("RGB").copy()
+            tile.thumbnail((card_width - 20, image_height - 10), Image.Resampling.LANCZOS)
+            x = left + (card_width - tile.width) // 2
+            y = top + 5 + (image_height - tile.height) // 2
+            sheet.paste(tile, (x, y))
+            sheet_draw.rectangle(
+                (left, top, left + card_width - 1, top + card_height - 1),
+                outline=(150, 150, 150),
+            )
+            sheet_draw.text(
+                (left + 8, top + image_height + 5),
+                f"T{index + 1:03d} region={plan.region_index}  R[{plan.logical_row_start},{plan.logical_row_end})  C[{plan.logical_column_start},{plan.logical_column_end})",
+                fill=(0, 0, 0),
+            )
+            sheet_draw.text(
+                (left + 8, top + image_height + 25),
+                f"header={plan.header_context_rows}  stub={plan.stub_context_columns}  size={plan.output_width}x{plan.output_height}",
+                fill=(0, 0, 0),
+            )
+        contact_path = image_dir / "tile_contact_sheet.jpg"
+        sheet.save(contact_path, format="JPEG", quality=90, optimize=True)
+        return {
+            "tile_count": len(all_plans),
+            "tile_overlay": str(overlay_path.resolve()),
+            "tile_contact_sheet": str(contact_path.resolve()),
+        }
+
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         # 配置摘要进入目录名，切换检测/切片参数后不会与旧 tiles 混在一起。
         image_dir = self.work_dir / "prepared" / (
@@ -221,12 +406,11 @@ class TablePipeline:
         tiles_dir.mkdir(parents=True, exist_ok=True)
 
         meta = self.backend.read_meta(image_path, known_sha256=image_sha256)
-        preview = self.backend.make_preview(image_path, self.config.preview_max_side)
-        preview.save(image_dir / "preview.png", format="PNG", optimize=True)
+        preview = self._make_detection_preview(image_path, meta, image_dir)
 
         detected = self._detect_regions(preview, meta)
         if isinstance(self.detector, InkTableDetector):
-            self.detector.save_debug(preview, image_dir / "ink_detection")
+            self._save_v6_detection_debug(preview, image_dir)
         if not detected:
             # 两套检测都失败时，保守地把整图作为一个区域，保证不漏文件。
             detected = [
@@ -282,6 +466,9 @@ class TablePipeline:
                 )
             )
 
+        audit = self._save_tile_audit(
+            preview, meta, regions, tiles_dir, image_dir
+        )
         manifest = {
             "schema_version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -290,6 +477,7 @@ class TablePipeline:
             "detector": self.detector.name,
             "config": self.config.to_dict(),
             "regions": [region.to_dict() for region in regions],
+            "audit": audit,
         }
         manifest_path = image_dir / "manifest.json"
         _json_dump(manifest_path, manifest)

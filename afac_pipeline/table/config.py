@@ -23,33 +23,41 @@ class TableConfig:
     yolo_confidence: float = 0.25
     yolo_imgsz: int = 1280
     preview_max_side: int = 1800
+    # v6 固定使用原图 20% 做边界分析，再把分析图缩到 25%，即原图 5%，
+    # 生成用于分开同图异表的低清密度图。固定比例可避免同一套像素参数随
+    # 原图尺寸变化而漂移。
+    table_analysis_scale: float = 0.20
+    table_density_scale: float = 0.25
+    table_analysis_max_side: int = 4096
     max_vlm_side: int = 3900
     tile_overlap: int = 160
     single_tile_min_scale: float = 0.65
     table_box_padding_ratio: float = 0.015
     ink_coarse_max_side: int = 384
-    ink_threshold: int = 245
+    ink_threshold: int = 225
     ink_minimum_density: float = 0.008
     ink_blur_ratio: float = 0.012
     ink_closing_ratio: float = 0.018
     ink_minimum_box_area_ratio: float = 0.01
-    grid_analysis_max_side: int = 2400
+    grid_analysis_max_side: int = 4096
     grid_white_threshold: int = 225
-    grid_line_min_ratio: float = 0.42
-    grid_min_line_count: int = 2
+    grid_line_min_ratio: float = 0.90
+    grid_min_line_count: int = 5
+    grid_black_line_ratio: float = 0.90
+    grid_reliable_line_count: int = 5
     grid_min_cell_size: int = 18
-    whitespace_blank_ratio: float = 0.002
-    whitespace_min_band: int = 8
-    whitespace_dilate_ratio: float = 0.008
-    whitespace_horizontal_dilate_ratio: float | None = None
-    whitespace_vertical_dilate_ratio: float | None = None
+    whitespace_blank_ratio: float = 0.01
+    whitespace_min_band: int = 1
+    whitespace_dilate_ratio: float = 0.004
+    whitespace_horizontal_dilate_ratio: float | None = 0.0015
+    whitespace_vertical_dilate_ratio: float | None = 0.004
     repeat_header_rows: int = 1
     repeat_stub_columns: int = 1
     projection_threshold: int = 225
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v3-model-free-region"
+    pipeline_version: str = "table-v6-density-grid"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -58,6 +66,12 @@ class TableConfig:
             raise ValueError("detector 只能是 auto、ink、projection 或 yolo")
         if not 512 <= self.preview_max_side <= 4096:
             raise ValueError("preview_max_side 应位于 512 到 4096 之间")
+        if not 0 < self.table_analysis_scale <= 1:
+            raise ValueError("table_analysis_scale 必须位于 (0, 1] 内")
+        if not 0 < self.table_density_scale <= 1:
+            raise ValueError("table_density_scale 必须位于 (0, 1] 内")
+        if not 512 <= self.table_analysis_max_side <= 4096:
+            raise ValueError("table_analysis_max_side 应位于 512 到 4096 之间")
         if not 512 <= self.max_vlm_side <= 4096:
             raise ValueError("max_vlm_side 应位于 512 到 4096 之间")
         if not 0 <= self.tile_overlap < self.max_vlm_side:
@@ -82,6 +96,10 @@ class TableConfig:
             raise ValueError("grid_line_min_ratio 必须位于 (0, 1] 内")
         if self.grid_min_line_count < 2 or self.grid_min_cell_size <= 0:
             raise ValueError("网格线数量和最小单元格尺寸配置不合法")
+        if not 0 < self.grid_black_line_ratio <= 1:
+            raise ValueError("grid_black_line_ratio 必须位于 (0, 1] 内")
+        if self.grid_reliable_line_count < 1:
+            raise ValueError("grid_reliable_line_count 至少为 1")
         if not 0 <= self.whitespace_blank_ratio < 1:
             raise ValueError("whitespace_blank_ratio 必须位于 [0, 1) 内")
         if self.whitespace_min_band <= 0 or self.whitespace_dilate_ratio <= 0:
