@@ -1,14 +1,31 @@
 import unittest
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from afac_pipeline.common.models import Box
 from afac_pipeline.table.config import TableConfig
-from afac_pipeline.table.grid import detect_grid_structure
+from afac_pipeline.table.grid import (
+    _whitespace_dilate_kernels,
+    detect_grid_structure,
+)
 from afac_pipeline.table.grid_tiling import plan_grid_tiles
 
 
 class TableGridTest(unittest.TestCase):
+    def test_horizontal_and_vertical_whitespace_dilation_can_differ(self) -> None:
+        ink = np.zeros((900, 1200), dtype=bool)
+        horizontal, vertical = _whitespace_dilate_kernels(
+            ink,
+            TableConfig(
+                whitespace_dilate_ratio=0.004,
+                whitespace_horizontal_dilate_ratio=0.0015,
+                whitespace_vertical_dilate_ratio=0.004,
+            ),
+        )
+        self.assertEqual(horizontal, 3)
+        self.assertEqual(vertical, 4)
+
     def test_ruled_grid_is_mapped_to_source_coordinates(self) -> None:
         image = Image.new("RGB", (600, 400), "white")
         draw = ImageDraw.Draw(image)

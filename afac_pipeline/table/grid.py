@@ -77,17 +77,35 @@ def _blank_band_centers(
     ]
 
 
+def _whitespace_dilate_kernels(
+    ink: np.ndarray, config: TableConfig
+) -> tuple[int, int]:
+    """分别计算找横向、纵向白带时的文字扩张长度。"""
+
+    horizontal_ratio = (
+        config.whitespace_horizontal_dilate_ratio
+        if config.whitespace_horizontal_dilate_ratio is not None
+        else config.whitespace_dilate_ratio
+    )
+    vertical_ratio = (
+        config.whitespace_vertical_dilate_ratio
+        if config.whitespace_vertical_dilate_ratio is not None
+        else config.whitespace_dilate_ratio
+    )
+    return (
+        max(3, round(ink.shape[1] * horizontal_ratio)),
+        max(3, round(ink.shape[0] * vertical_ratio)),
+    )
+
+
 def _whitespace_centers(
     ink: np.ndarray, config: TableConfig
 ) -> tuple[list[int], list[int]]:
     """无线表格兜底：扩张文字后，再寻找贯穿整行或整列的长空白带。"""
 
     binary = ink.astype(np.uint8)
-    horizontal_kernel = max(
-        3, round(ink.shape[1] * config.whitespace_dilate_ratio)
-    )
-    vertical_kernel = max(
-        3, round(ink.shape[0] * config.whitespace_dilate_ratio)
+    horizontal_kernel, vertical_kernel = _whitespace_dilate_kernels(
+        ink, config
     )
     for_rows = cv2.dilate(
         binary,

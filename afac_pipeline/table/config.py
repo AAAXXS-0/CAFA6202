@@ -41,6 +41,8 @@ class TableConfig:
     whitespace_blank_ratio: float = 0.002
     whitespace_min_band: int = 8
     whitespace_dilate_ratio: float = 0.008
+    whitespace_horizontal_dilate_ratio: float | None = None
+    whitespace_vertical_dilate_ratio: float | None = None
     repeat_header_rows: int = 1
     repeat_stub_columns: int = 1
     projection_threshold: int = 225
@@ -84,6 +86,16 @@ class TableConfig:
             raise ValueError("whitespace_blank_ratio 必须位于 [0, 1) 内")
         if self.whitespace_min_band <= 0 or self.whitespace_dilate_ratio <= 0:
             raise ValueError("空白带最小宽度和墨水扩张比例必须大于 0")
+        if (
+            self.whitespace_horizontal_dilate_ratio is not None
+            and self.whitespace_horizontal_dilate_ratio <= 0
+        ):
+            raise ValueError("横向文字扩张比例必须大于 0")
+        if (
+            self.whitespace_vertical_dilate_ratio is not None
+            and self.whitespace_vertical_dilate_ratio <= 0
+        ):
+            raise ValueError("纵向文字扩张比例必须大于 0")
         if self.repeat_header_rows < 0 or self.repeat_stub_columns < 0:
             raise ValueError("重复表头行数和行名列数不能为负数")
 

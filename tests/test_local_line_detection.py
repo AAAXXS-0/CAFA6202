@@ -4,10 +4,20 @@ import numpy as np
 
 from afac_pipeline.table.tools.experiment_density_split_and_boundaries import (
     adaptive_line_segments,
+    dense_content_box,
 )
 
 
 class LocalLineDetectionTest(unittest.TestCase):
+    def test_analysis_box_keeps_sparse_edge_data(self) -> None:
+        ink = np.zeros((100, 200), dtype=bool)
+        ink[20:80, 50:150] = True
+        ink[50, 5:10] = True
+        ink[55, 190:195] = True
+        box = dense_content_box(ink)
+        self.assertLessEqual(box.x1, 5)
+        self.assertGreaterEqual(box.x2, 195)
+
     def test_trapezoid_lines_use_their_own_active_span(self) -> None:
         """梯形短线相对自身是完整黑线，不应被外接矩形的白底稀释。"""
 

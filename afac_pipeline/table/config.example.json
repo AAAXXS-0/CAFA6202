@@ -23,6 +23,8 @@
   "whitespace_blank_ratio": 0.002,
   "whitespace_min_band": 8,
   "whitespace_dilate_ratio": 0.008,
+  "whitespace_horizontal_dilate_ratio": null,
+  "whitespace_vertical_dilate_ratio": null,
   "repeat_header_rows": 1,
   "repeat_stub_columns": 1,
   "projection_threshold": 225,

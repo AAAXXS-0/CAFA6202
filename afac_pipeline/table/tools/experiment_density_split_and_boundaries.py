@@ -22,7 +22,10 @@ from afac_pipeline.table.density_split import (  # noqa: E402
     boxes_from_bands,
     find_density_bands,
 )
-from afac_pipeline.table.grid import _whitespace_centers  # noqa: E402
+from afac_pipeline.table.grid import (  # noqa: E402
+    _whitespace_centers,
+    _whitespace_dilate_kernels,
+)
 from afac_pipeline.table.ink_region import density_visualization, detect_ink_regions  # noqa: E402
 
 
@@ -61,11 +64,11 @@ def map_box(box: Box, from_size: tuple[int, int], to_size: tuple[int, int]) -> B
     ).clamp(to_width, to_height)
 
 
-def dense_content_box(ink: np.ndarray, projection_ratio: float = 0.06) -> Box:
-    """删除标题、页边等稀疏墨水，只保留当前分表块中的主体区域。
+def dense_content_box(ink: np.ndarray, projection_ratio: float = 0.01) -> Box:
+    """保守删除页边空白，分析框宁可稍大也不漏掉稀疏边缘数据。
 
-    同一分表块里可能带有左侧标题。标题横向很长，但只占少数几行；按横纵
-    投影峰值的 6% 取范围，可以保留主体表格，同时不让标题扩大分析矩形。
+    横纵投影只要求达到峰值的 1%，并允许单像素级的稀疏墨迹进入候选。
+    最后额外向外留出约短边 1% 的 padding，避免矩形贴着数据边缘。
     """
 
     if not ink.any():
@@ -73,14 +76,14 @@ def dense_content_box(ink: np.ndarray, projection_ratio: float = 0.06) -> Box:
     row_ratio = ink.mean(axis=1)
     column_ratio = ink.mean(axis=0)
     rows = np.flatnonzero(
-        row_ratio >= max(0.001, float(row_ratio.max()) * projection_ratio)
+        row_ratio >= max(0.0005, float(row_ratio.max()) * projection_ratio)
     )
     columns = np.flatnonzero(
-        column_ratio >= max(0.001, float(column_ratio.max()) * projection_ratio)
+        column_ratio >= max(0.0005, float(column_ratio.max()) * projection_ratio)
     )
     if rows.size == 0 or columns.size == 0:
         return Box(0, 0, ink.shape[1], ink.shape[0])
-    padding = 2
+    padding = max(4, round(min(ink.shape) * 0.01))
     return Box(
         max(0, int(columns[0]) - padding),
         max(0, int(rows[0]) - padding),
@@ -195,18 +198,6 @@ def draw_full_lines(
         draw.line((box.x1 + x, box.y1, box.x1 + x, box.y2), fill=color, width=width)
 
 
-def keep_interior_centers(centers: list[int], length: int) -> list[int]:
-    """排除候选表外沿的大片白边，只展示可能属于内部行列的白带。
-
-    墨水分表得到的矩形会带少量外围留白。若直接把这些留白当作无线表格
-    的行列空隙，图上就会在表格外缘多画一圈误导性的橙线。这里仅作用于
-    实验可视化，保留离两端至少 3%（且至少 8 像素）的白带中心。
-    """
-
-    margin = max(8, round(length * 0.03))
-    return [center for center in centers if margin < center < length - margin]
-
-
 def binary_preview(mask: np.ndarray) -> Image.Image:
     """将 True=墨水 的布尔图保存成便于查看的黑白图。"""
 
@@ -234,11 +225,8 @@ def whitespace_debug_data(
     """复现 grid._whitespace_centers 的文字扩张，返回可视化和精确投影。"""
 
     binary = ink.astype(np.uint8)
-    horizontal_kernel = max(
-        3, round(ink.shape[1] * config.whitespace_dilate_ratio)
-    )
-    vertical_kernel = max(
-        3, round(ink.shape[0] * config.whitespace_dilate_ratio)
+    horizontal_kernel, vertical_kernel = _whitespace_dilate_kernels(
+        ink, config
     )
     for_rows = cv2.dilate(
         binary,
@@ -303,48 +291,6 @@ def profile_plot(
     if len(points) >= 2:
         draw.line(points, fill=(0, 80, 220), width=1)
     canvas.save(output_path)
-
-
-def draw_local_candidates(
-    image: Image.Image,
-    raw_rows: list[int],
-    raw_columns: list[int],
-    kept_rows: list[int],
-    kept_columns: list[int],
-) -> tuple[Image.Image, Image.Image]:
-    """分别绘制过滤前候选，以及保留/删除后的对比。"""
-
-    box = Box(0, 0, image.width, image.height)
-    before = image.copy()
-    draw_full_lines(
-        ImageDraw.Draw(before),
-        box,
-        raw_rows,
-        raw_columns,
-        (255, 128, 0),
-        1,
-    )
-    after = image.copy()
-    after_draw = ImageDraw.Draw(after)
-    removed_rows = sorted(set(raw_rows) - set(kept_rows))
-    removed_columns = sorted(set(raw_columns) - set(kept_columns))
-    draw_full_lines(
-        after_draw,
-        box,
-        removed_rows,
-        removed_columns,
-        (255, 0, 0),
-        2,
-    )
-    draw_full_lines(
-        after_draw,
-        box,
-        kept_rows,
-        kept_columns,
-        (0, 180, 0),
-        1,
-    )
-    return before, after
 
 
 def save_table_intermediates(
@@ -434,63 +380,29 @@ def save_table_intermediates(
         table_directory / "010_找纵向白带_文字上下扩张后.png"
     )
 
-    edge_image = analysis_image.convert("RGBA")
-    edge_layer = Image.new("RGBA", edge_image.size, (0, 0, 0, 0))
-    edge_draw = ImageDraw.Draw(edge_layer)
-    row_margin = max(8, round(analysis_image.height * 0.03))
-    column_margin = max(8, round(analysis_image.width * 0.03))
-    edge_draw.rectangle(
-        (0, 0, analysis_image.width, row_margin),
-        fill=(255, 0, 0, 70),
-    )
-    edge_draw.rectangle(
-        (
-            0,
-            analysis_image.height - row_margin,
-            analysis_image.width,
-            analysis_image.height,
-        ),
-        fill=(255, 0, 0, 70),
-    )
-    edge_draw.rectangle(
-        (0, 0, column_margin, analysis_image.height),
-        fill=(255, 0, 0, 70),
-    )
-    edge_draw.rectangle(
-        (
-            analysis_image.width - column_margin,
-            0,
-            analysis_image.width,
-            analysis_image.height,
-        ),
-        fill=(255, 0, 0, 70),
-    )
-    Image.alpha_composite(edge_image, edge_layer).convert("RGB").save(
-        table_directory / "011_红色为3%或8像素外沿排除区.png"
-    )
-
-    before, after = draw_local_candidates(
-        analysis_image,
-        raw_white_rows,
-        raw_white_columns,
+    all_white = analysis_image.copy()
+    draw_full_lines(
+        ImageDraw.Draw(all_white),
+        Box(0, 0, analysis_image.width, analysis_image.height),
         white_rows,
         white_columns,
+        (255, 128, 0),
+        1,
     )
-    before.save(table_directory / "012_外沿过滤前全部白带.png")
-    after.save(
-        table_directory / "013_外沿过滤后_绿色保留_红色删除.png"
+    all_white.save(
+        table_directory / "011_全部白带候选_不再删除外沿.png"
     )
     profile_plot(
         row_ratios,
-        table_directory / "014_横向白带墨水比例_红线为1%.png",
+        table_directory / "012_横向白带墨水比例_红线为1%.png",
         config.whitespace_blank_ratio,
     )
     profile_plot(
         column_ratios,
-        table_directory / "015_纵向白带墨水比例_红线为1%.png",
+        table_directory / "013_纵向白带墨水比例_红线为1%.png",
         config.whitespace_blank_ratio,
     )
-    (table_directory / "014_横向白带墨水比例.csv").write_text(
+    (table_directory / "012_横向白带墨水比例.csv").write_text(
         "position,ink_ratio\n"
         + "\n".join(
             f"{index},{float(value):.8f}"
@@ -498,7 +410,7 @@ def save_table_intermediates(
         ),
         encoding="utf-8",
     )
-    (table_directory / "015_纵向白带墨水比例.csv").write_text(
+    (table_directory / "013_纵向白带墨水比例.csv").write_text(
         "position,ink_ratio\n"
         + "\n".join(
             f"{index},{float(value):.8f}"
@@ -517,10 +429,8 @@ def save_table_intermediates(
         draw_segments(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), [], black_columns, (0, 180, 0), 1)
     else:
         draw_full_lines(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), [], white_columns, (255, 128, 0), 1)
-    final_image.save(table_directory / "016_当前规则最终边界.png")
+    final_image.save(table_directory / "014_当前规则最终边界.png")
 
-    removed_rows = sorted(set(raw_white_rows) - set(white_rows))
-    removed_columns = sorted(set(raw_white_columns) - set(white_columns))
     diagnostic = {
         "table_index": table_index,
         "split_image_size": list(table_image.size),
@@ -533,29 +443,18 @@ def save_table_intermediates(
         "white_band_minimum_thickness": config.whitespace_min_band,
         "horizontal_detection_dilate_kernel": [horizontal_kernel, 1],
         "vertical_detection_dilate_kernel": [1, vertical_kernel],
-        "row_edge_margin": row_margin,
-        "column_edge_margin": column_margin,
-        "raw_white_rows": raw_white_rows,
-        "raw_white_columns": raw_white_columns,
-        "kept_white_rows": white_rows,
-        "kept_white_columns": white_columns,
-        "removed_white_rows": removed_rows,
-        "removed_white_columns": removed_columns,
+        "edge_filter": "disabled",
+        "detected_white_rows": white_rows,
+        "detected_white_columns": white_columns,
         "black_rows": [line.__dict__ for line in black_rows],
         "black_columns": [line.__dict__ for line in black_columns],
         "selected_row_source": row_source,
         "selected_column_source": column_source,
-        "global_kept_horizontal_lines": [
+        "global_horizontal_lines": [
             analysis_box.y1 + value for value in white_rows
         ],
-        "global_kept_vertical_lines": [
+        "global_vertical_lines": [
             analysis_box.x1 + value for value in white_columns
-        ],
-        "global_removed_horizontal_lines": [
-            analysis_box.y1 + value for value in removed_rows
-        ],
-        "global_removed_vertical_lines": [
-            analysis_box.x1 + value for value in removed_columns
         ],
     }
     (table_directory / "诊断数据.json").write_text(
@@ -630,6 +529,8 @@ def main() -> None:
         whitespace_blank_ratio=0.01,
         whitespace_min_band=1,
         whitespace_dilate_ratio=0.004,
+        whitespace_horizontal_dilate_ratio=0.0015,
+        whitespace_vertical_dilate_ratio=0.004,
     )
     reports: list[dict[str, object]] = []
     for index, box in enumerate(preview_boxes):
@@ -667,10 +568,8 @@ def main() -> None:
         raw_white_rows, raw_white_columns = _whitespace_centers(
             structure_ink, config
         )
-        white_rows = keep_interior_centers(raw_white_rows, structure_ink.shape[0])
-        white_columns = keep_interior_centers(
-            raw_white_columns, structure_ink.shape[1]
-        )
+        white_rows = list(raw_white_rows)
+        white_columns = list(raw_white_columns)
         draw_full_lines(
             white_draw,
             analysis_box,
@@ -740,8 +639,7 @@ def main() -> None:
                 "black_columns": len(black_columns),
                 "white_rows": len(white_rows),
                 "white_columns": len(white_columns),
-                "filtered_edge_white_rows": len(raw_white_rows) - len(white_rows),
-                "filtered_edge_white_columns": len(raw_white_columns) - len(white_columns),
+                "edge_filter": "disabled",
                 "selected_row_source": row_source,
                 "selected_column_source": column_source,
             }
