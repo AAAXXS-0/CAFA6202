@@ -13,6 +13,7 @@ from typing import Any
 class LongConfig:
     """固定检测滑窗与自适应最终安全切块参数。"""
 
+    strategy: str = "semantic"
     backend: str = "auto"
     yolo_model_path: str = "360LayoutAnalysis/general6-8n.pt"
     window_height: int = 2048
@@ -39,11 +40,21 @@ class LongConfig:
     max_vlm_height: int = 3900
     vlm_overlap: int = 200
     safe_cut_search: int = 600
-    # 保留旧字段以便读取旧清单；新流程不再按标题语义段物理切块。
+    # semantic 策略只把高可信 H2 当成真正的章节边界；低可信标题留在
+    # 章节内部交给 FinixDoc-VL 判断，避免一次误切破坏整章结构。
+    semantic_h2_min_score: float = 0.62
+    semantic_ink_threshold: int = 225
+    semantic_active_row_ratio: float = 0.01
+    semantic_title_padding: int = 12
+    semantic_context_gap: int = 10
+    semantic_audit_windows: bool = True
+    # 保留旧字段以便读取旧清单；semantic 主流程不再直接使用该值。
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v4-adaptive-safe-cut"
+    pipeline_version: str = "long-v5-semantic-h2"
 
     def __post_init__(self) -> None:
+        if self.strategy not in {"semantic", "legacy"}:
+            raise ValueError("strategy 只能是 semantic 或 legacy")
         if self.backend not in {"auto", "pillow", "vips"}:
             raise ValueError("backend 只能是 auto、pillow 或 vips")
         if self.window_height <= 0 or self.window_step <= 0:
@@ -79,6 +90,14 @@ class LongConfig:
             raise ValueError("自适应目标高度不能超过 max_vlm_height")
         if self.safe_cut_search < 0:
             raise ValueError("safe_cut_search 不能小于 0")
+        if not 0 <= self.semantic_h2_min_score <= 1:
+            raise ValueError("semantic_h2_min_score 必须位于 0 到 1 之间")
+        if not 0 <= self.semantic_ink_threshold <= 255:
+            raise ValueError("semantic_ink_threshold 必须位于 0 到 255 之间")
+        if not 0 <= self.semantic_active_row_ratio <= 1:
+            raise ValueError("semantic_active_row_ratio 必须位于 0 到 1 之间")
+        if self.semantic_title_padding < 0 or self.semantic_context_gap < 0:
+            raise ValueError("语义标题留白和上下文间隔不能小于 0")
         if not 0 <= self.vlm_overlap < self.adaptive_min_height:
             raise ValueError("vlm_overlap 必须小于自适应最小高度")
         if self.minimum_part_height >= self.max_vlm_height:

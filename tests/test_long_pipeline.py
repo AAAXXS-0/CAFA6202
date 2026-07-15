@@ -57,7 +57,7 @@ class LongPipelineTest(unittest.TestCase):
             self.assertEqual(dataset["image_count"], 1)
             self.assertGreater(detector.window_count, 1)
             self.assertEqual(image_manifest["detector"], "fake-general6")
-            self.assertEqual(image_manifest["schema_version"], 2)
+            self.assertEqual(image_manifest["schema_version"], 3)
             self.assertGreater(len(image_manifest["safe_chunks"]), 1)
             self.assertGreaterEqual(
                 image_manifest["adaptive_cutting"]["fallback_overlap_count"],

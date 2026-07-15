@@ -128,7 +128,7 @@ class GeneralYoloDetector(LongLayoutDetector):
                 # project/name 把 Ultralytics 自动输出约束在当前图片目录，避免
                 # 散落到仓库根目录的 runs/detect/predict*。
                 save=self.config.save_yolo_debug,
-                project=str(batch_output_dir.parent) if batch_output_dir else None,
+                project=str(batch_output_dir.parent.resolve()) if batch_output_dir else None,
                 name=batch_output_dir.name if batch_output_dir else None,
                 exist_ok=True,
                 stream=False,

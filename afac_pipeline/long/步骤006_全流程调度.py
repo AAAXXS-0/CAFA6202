@@ -13,13 +13,26 @@ from ..common.cache import ResultCache
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
 from .config import LongConfig
-from .步骤003_滑窗与YOLO检测 import GeneralYoloDetector, LongLayoutDetector, plan_detection_windows
-from .步骤002_图片读写与裁切 import save_many_crops
+from .步骤003_滑窗与YOLO检测 import (
+    GeneralYoloDetector,
+    LongLayoutDetector,
+    plan_detection_windows,
+)
+from .步骤002_图片读写与裁切 import (
+    save_many_crops,
+    save_recognition_pack_images,
+)
+from .步骤004_语义标题分析 import (
+    analyze_semantic_headings,
+    save_heading_audit_windows,
+)
 from .步骤005_大模型请求打包 import (
     RecognitionPack,
     build_adaptive_recognition_packs,
     build_pack_prompt,
+    build_semantic_recognition_packs,
     normalize_markdown_heading_levels,
+    strip_repeated_context_headings,
 )
 from .步骤004_自适应安全切块 import (
     build_adaptive_chunks,
@@ -30,7 +43,7 @@ from ..common.submission import write_submission
 from ..common.vlm_client import FinixDocClient
 
 
-LONG_PROMPT_VERSION = "long-markdown-v3-adaptive-safe-cut"
+LONG_PROMPT_VERSION = "long-markdown-v4-semantic-h2"
 
 
 def _dump_json(path: Path, value: Any) -> None:
@@ -58,7 +71,6 @@ def merge_markdown_overlap(left: str, right: str, max_chars: int = 1600) -> str:
         if left[-length:] == right[:length]:
             return left + right[length:]
 
-    # Markdown 模型有时只改变接缝空白；按行去除空白后再比较最近若干行。
     left_lines = left.splitlines()
     right_lines = right.splitlines()
     max_lines = min(len(left_lines), len(right_lines), 20)
@@ -84,8 +96,6 @@ class LongPipeline:
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.backend: ImageBackend = create_backend(config.backend)
-        # run-long 只读取已经准备好的裁片，不应强制安装或加载 YOLO。
-        # 首次进入 prepare-long 时再创建检测器，并在后续图片间复用模型实例。
         self.detector = detector
         self.cache = ResultCache(self.work_dir / "cache.sqlite3")
 
@@ -98,6 +108,7 @@ class LongPipeline:
         image_dir = self.work_dir / "prepared" / f"{image_path.stem}_{image_sha256[:12]}"
         window_dir = image_dir / "detection_windows"
         request_dir = image_dir / "vlm_requests"
+        audit_dir = image_dir / "semantic_audit"
         image_dir.mkdir(parents=True, exist_ok=True)
 
         meta = self.backend.read_meta(image_path, known_sha256=image_sha256)
@@ -122,30 +133,65 @@ class LongPipeline:
             sample_width=self.config.projection_sample_width,
             white_threshold=self.config.projection_white_threshold,
         )
-        safe_chunks, adaptive_debug = build_adaptive_chunks(
+        # legacy 结果始终计算并写入清单：既是显式回退，也是新旧流程对照基线。
+        legacy_chunks, legacy_debug = build_adaptive_chunks(
             meta.width,
             meta.height,
             projection,
             blocks,
             self.config,
         )
-        request_packs = build_adaptive_recognition_packs(
-            safe_chunks,
-            meta.width,
+        semantic_headings: list[Any] = []
+        heading_debug: dict[str, Any] | None = None
+        semantic_debug: dict[str, Any] | None = None
+        if self.config.strategy == "semantic":
+            semantic_headings, evidence, heading_debug = analyze_semantic_headings(
+                blocks,
+                meta.width,
+                window_paths,
+                windows,
+                self.config,
+            )
+            request_packs, semantic_debug = build_semantic_recognition_packs(
+                semantic_headings,
+                blocks,
+                projection,
+                meta.width,
+                meta.height,
+                self.config,
+            )
+            _dump_json(audit_dir / "005_标题层级证据.json", heading_debug)
+            _dump_json(audit_dir / "007_请求切块清单.json", semantic_debug)
+            if self.config.semantic_audit_windows:
+                save_heading_audit_windows(
+                    window_paths,
+                    windows,
+                    semantic_headings,
+                    evidence,
+                    audit_dir / "006_标题层级窗口图",
+                )
+        else:
+            request_packs = build_adaptive_recognition_packs(
+                legacy_chunks,
+                meta.width,
+            )
+
+        save_recognition_pack_images(
+            image_path,
+            request_packs,
+            request_dir,
+            self.backend,
+            context_gap=self.config.semantic_context_gap,
+            maximum_height=self.config.max_vlm_height,
         )
 
-        request_crops = [
-            (pack.source_box, request_dir / pack.file_name, 1.0)
-            for pack in request_packs
-        ]
-        save_many_crops(image_path, request_crops, self.backend)
-
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
             "detector": detector.name,
+            "strategy": self.config.strategy,
             "config": self.config.to_dict(),
             "yolo_raw": (
                 {
@@ -157,8 +203,11 @@ class LongPipeline:
             ),
             "windows": [window.to_dict() for window in windows],
             "layout_blocks": [block.to_dict() for block in blocks],
-            "adaptive_cutting": adaptive_debug,
-            "safe_chunks": [chunk.to_dict() for chunk in safe_chunks],
+            "adaptive_cutting": legacy_debug,
+            "safe_chunks": [chunk.to_dict() for chunk in legacy_chunks],
+            "semantic_headings": [item.to_dict() for item in semantic_headings],
+            "semantic_analysis": heading_debug,
+            "semantic_cutting": semantic_debug,
             "request_packs": [pack.to_dict() for pack in request_packs],
         }
         manifest_path = image_dir / "manifest.json"
@@ -210,6 +259,7 @@ class LongPipeline:
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         current = ""
+        seen_heading_text: dict[str, str] = {}
         response_dir = manifest_path.parent / "responses"
         response_dir.mkdir(parents=True, exist_ok=True)
         raw_packs = image_manifest["request_packs"]
@@ -239,18 +289,26 @@ class LongPipeline:
                     },
                 )
             (response_dir / f"{pack.id}.md").write_text(markdown, encoding="utf-8")
+            cleaned = strip_repeated_context_headings(
+                markdown,
+                pack,
+                seen_heading_text,
+            )
+            (response_dir / f"{pack.id}_聚合输入.md").write_text(
+                cleaned,
+                encoding="utf-8",
+            )
             print(
                 f"[长图识别 {index:02d}/{len(raw_packs):02d}] "
                 f"{pack.file_name}：{source}完成，Markdown {len(markdown)} 字符",
                 flush=True,
             )
             if not current:
-                current = markdown.strip()
+                current = cleaned.strip()
             elif pack.overlap_top != 0:
-                # overlap_top=-1 代表旧版清单未知重叠情况，继续使用兼容去重。
-                current = merge_markdown_overlap(current, markdown)
+                current = merge_markdown_overlap(current, cleaned)
             else:
-                current = current.rstrip() + "\n\n" + markdown.lstrip()
+                current = current.rstrip() + "\n\n" + cleaned.lstrip()
         return normalize_markdown_heading_levels(current.strip())
 
     def recognize_dataset(

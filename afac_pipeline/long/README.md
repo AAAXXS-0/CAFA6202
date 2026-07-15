@@ -1,167 +1,141 @@
 # 长图分支说明
 
-长图分支只处理赛题已经分好的长图目录，不做自动路由。新流程把“小模型检测窗口”和“最终 VLM 图片块”彻底分开：
+长图默认使用 `semantic` 语义章节策略，同时完整保留原来的 `legacy` 自适应安全切块。两种策略共用固定检测窗口、general6-8n、原图坐标合并、API 缓存和 CSV 输出。
+
+## 正式流程
 
 ```mermaid
 flowchart TD
-    A["赛题已分好的长图"] --> B["预处理与原图元数据"]
-    B --> C["固定检测滑窗<br/>高度 2048 / 步长 1792"]
-    C --> D["general6-8n 低阈值版面检测"]
-    D --> E["责任区筛选、映射回原图、全局 NMS"]
-    C --> F["责任区逐行墨水投影"]
-    E --> G["版面切割保护区间"]
-    F --> H["在 3200px 附近搜索安全空白带"]
-    G --> H
-    H --> I{"存在安全切线？"}
-    I -- "是" --> J["无重叠连续原图块"]
-    I -- "否" --> K["最低墨水位置 + 200px 重叠兜底"]
-    J --> L["最高 3900px 的 VLM 请求图"]
-    K --> L
-    L --> M{"选择识别后端"}
-    M -- "官方模式" --> V["FinixDoc-VL 输出 Markdown"]
-    M -- "本地模式" --> S["约 2000px 重叠 OCR 小块"]
-    S --> T["RapidOCR 输出文字框"]
-    T --> U["按 Title/Text 坐标恢复标题与段落"]
-    V --> N{"当前块是否真实重叠？"}
-    U --> N
-    N -- "是" --> O["接缝文本去重"]
-    N -- "否" --> P["直接按阅读顺序拼接"]
-    O --> Q["按已识别编号校正标题层级"]
-    P --> Q
-    Q --> R["长图分支 CSV"]
+    A["赛题长图"] --> B["固定检测窗口<br/>2048 高 / 1792 步长"]
+    B --> C["general6-8n 检测 Title/Text"]
+    C --> D["责任区筛选、映射回原图、全局去重"]
+    B --> E["逐行墨迹投影"]
+    D --> F["Title 候选"]
+    F --> G["模型置信度 + 相对墨迹字号 + 左缩进<br/>+ 连续标题规则 + 全文顺序"]
+    E --> G
+    G --> H["高精度 H2 边界与 H3 切点候选"]
+    H --> I{"完整 H2 是否不超过 3900px？"}
+    I -- "是" --> J["H2 及全部 H3/H4 一次请求"]
+    I -- "否" --> K["按 H3 边界分组"]
+    K --> L{"单个 H3 是否仍过长？"}
+    L -- "否" --> M["H2 原图标题条 + 一个或多个完整 H3"]
+    L -- "是" --> N["H2 + H3 原图标题条<br/>正文按安全空白继续切割"]
+    N --> O["完全没有安全空白时才保留少量重叠"]
+    J --> P["FinixDoc-VL 输出 Markdown"]
+    M --> P
+    O --> P
+    P --> Q["按稳定标题 ID 和原图顺序聚合"]
+    Q --> R["删除重复上下文标题和接缝重复"]
+    R --> S["长图 CSV"]
 ```
 
-小模型始终只负责切割保护，绝不再按照标题树切割原图。官方 VLM 模式由
-VLM 自己判断标题；本地 OCR 没有视觉语义能力，因此仅在识别后复用 Title
-坐标和旧标题规则添加 Markdown 井号，不影响任何物理切块。
+小模型始终只看固定的 2048px 检测窗口。即使一个 H2 高几万像素，也不会把整个 H2 重新送进小模型。超长 H2 只影响最终的 FinixDoc-VL 请求规划。
+
+## 两种策略
+
+在 `config.example.json` 中选择：
+
+```json
+{
+  "strategy": "semantic"
+}
+```
+
+- `semantic`：默认正式流程。整 H2 优先，超长时按 H3，再按段落空白，最后才重叠切割。
+- `legacy`：保留旧版“约 3200px 搜索安全空白带”的物理切割，不依赖标题层级。
+
+如果 semantic 没有找到任何可靠 H2，会自动退回 legacy，不会因为标题检测失败而丢掉整张图。
+
+## 标题证据
+
+semantic 不用绝对字号直接硬判 H2，而是融合以下通用证据：
+
+- general6 的 Title 置信度；
+- Title 框中的实际墨迹行高与当前文档正文行高之比；
+- 标题左缩进和是否居中；
+- 用户提出的“连续 Title、中间无 Text”结构规律；
+- 旧标题规则给出的参考层级；
+- 全文标题先后关系。
+
+只有高分且非居中的标题才作为 H2 物理边界。中低可信标题继续留在 H2 图片内部，由 FinixDoc-VL 判断真实层级。标题编号暂时由 FinixDoc-VL 读取；代码已经为以后“仅识别标题条的轻量 OCR”预留证据字段。
+
+这些判断全部基于当前图片的相对比例，不按文件名、测试图坐标或固定章节数量写特殊分支。
+
+## 超长 H2 的上下文图
+
+如果完整 H2 超过输入限制，程序优先把相邻的若干完整 H3 组合到同一请求中，直到接近 3900px。后续请求顶部会粘贴该 H2 的原图标题条：
+
+```text
+┌────────────────────────────┐
+│ H2 原图标题条              │
+├────────细灰分隔线──────────┤
+│ H3 标题及其完整正文        │
+│ 下一个 H3 及其完整正文     │
+└────────────────────────────┘
+```
+
+如果单个 H3 仍然过长，则每个续块携带 H2 与 H3 两条上下文。标题条直接裁自原图，不经过本地 OCR，也不重新绘制文字。
+
+聚合主要使用清单里的 `context_heading_ids`、`visible_heading_ids` 和 `sequence`，标题文字相似度只用于确认是否安全删除重复标题，不承担定位职责。
 
 ## 代码阅读顺序
 
 ```text
-步骤001_数据定义.py             # 检测窗口、版面框和最终安全块数据结构
-步骤002_图片读写与裁切.py       # 从超长原图保存检测窗口和 VLM 请求图
-步骤003_滑窗与YOLO检测.py       # 固定检测滑窗、低阈值保护框、责任区和 NMS
-步骤004_自适应安全切块.py       # 墨水投影、保护区间、空白带与重叠兜底
-步骤005_大模型请求打包.py       # 请求提示词和 Markdown 标题编号校正
-步骤006_全流程调度.py           # 准备目录、API 缓存、聚合与 CSV
-步骤007_本地OCR识别.py          # OCR 行排序、标题/段落恢复、缓存与 CSV
+步骤001_数据定义.py                 # 检测窗口、版面框、标题和安全块数据结构
+步骤002_图片读写与裁切.py           # 原图裁切、H2/H3 标题条与正文复合图
+步骤003_滑窗与YOLO检测.py           # 固定窗口、general6、责任区与全局去重
+步骤004_语义标题分析.py             # 相对墨迹字号、证据加权和 H2/H3 推断
+步骤004_自适应安全切块.py           # legacy 流程及 semantic 最后兜底
+步骤005_大模型请求打包.py           # H2/H3 请求规划、Prompt 和重复标题去除
+步骤006_全流程调度.py               # 准备、API、缓存、聚合和 CSV
+步骤007_本地OCR识别.py              # 可选本地 OCR 后端，不是正式默认路径
 ```
 
-旧版“连续 Title 推断标题层级”的实现已移动到：
+早期连续 Title 标题树仍保留在：
 
 ```text
 工具/工具004_旧标题层级分析.py
 ```
 
-它只用于历史对照和旧测试，不参与新版正式切块。
+它现在是 semantic 的一项参考证据，也是 legacy/本地 OCR 的兼容实现，不再单独决定最终请求边界。
 
-## 1. 关键配置
-
-配置示例为 `afac_pipeline/long/config.example.json`。
-
-检测阶段：
-
-- 检测窗口高度：2048；
-- 窗口步长：1792；
-- 检测重叠：256；
-- YOLO 输入尺寸：640；
-- YOLO 基础置信度：0.25；
-- 切割保护置信度：0.25；
-- 保护框上下扩展：16px；
-- Title 语义参考阈值：0.60；
-- Text 语义参考阈值：0.50。
-
-基础置信度降低到 0.25 只用于安全切割保护。低置信度框不会被用于强制判断标题层级；误保护最多让切口稍微移动，漏保护则可能切断正文，因此这里采用偏保守策略。
-
-自适应切割阶段：
-
-- 墨水投影采样宽度：256；
-- 白色像素阈值：245；
-- 空白行最大墨水比例：0.01；
-- 最小连续空白带：8px；
-- 目标块高度：3200；
-- 常规最小块高度：2200；
-- 最大块高度：3900；
-- 安全切线搜索半径：600；
-- 无安全空白时兜底重叠：200。
-
-## 2. 两套切割的职责
-
-### 检测窗口
-
-检测窗口固定为 2048/1792，不直接发送给 FinixDoc-VL。固定尺寸能保证 general6 的文字缩放比例稳定，256px 重叠使落在边缘的标题通常至少在一个窗口中完整出现。
-
-每个窗口只有自己的 ownership 责任区可以保留检测框，随后所有框映射回原图坐标并做全局去重。
-
-### 最终 VLM 安全块
-
-程序利用检测窗口的 ownership 区域计算原图逐行墨水比例，因此不需要再次把十万像素高的原图整体解码到额外内存。
-
-对于每个预计切口：
-
-1. 从当前块起点向下约 3200px；
-2. 在前后 600px 搜索连续空白带；
-3. 排除穿过 Text、Title、Table、Figure 等保护框的位置；
-4. 从得分最高的空白带切开，前后块不重叠；
-5. 如果合法高度范围内完全没有安全空白，选择墨水最少的位置；
-6. 兜底切口前后各保留约 100px，总重叠约 200px。
-
-任何请求块都不得超过 3900px，并且所有请求块的并集必须完整覆盖原图。
-
-## 3. 准备长图
+## 准备长图
 
 ```bash
-python main.py prepare-long \
+/usr/bin/python3 main.py prepare-long \
   --input-dir "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images" \
   --work-dir work/long \
   --config afac_pipeline/long/config.example.json
 ```
 
-输出结构：
+单图输出：
 
 ```text
-work/long/
-├── cache.sqlite3
-├── dataset_manifest.json
-└── prepared/<文件名_哈希>/
-    ├── manifest.json
-    ├── detection_windows/       # 只送入小模型的固定滑窗
-    ├── yolo_raw/                # Ultralytics 原生标框和审计 JSON
-    └── vlm_requests/            # 从原图裁出的自适应安全块
+prepared/<文件名_哈希>/
+├── manifest.json
+├── detection_windows/              # 固定小模型窗口
+├── yolo_raw/                       # YOLO 自带标框及 predictions.json
+├── semantic_audit/
+│   ├── 005_标题层级证据.json
+│   ├── 006_标题层级窗口图/         # H1/H2/H3 与分数画回窗口
+│   └── 007_请求切块清单.json
+├── vlm_request_parts/              # 每张复合请求的原始正文/标题条
+└── vlm_requests/                   # 实际发送给 FinixDoc-VL 的图片
 ```
 
-单图 `manifest.json` 的关键字段：
+`manifest.json` 另外记录：
 
-- `windows`：固定检测滑窗和 ownership 范围；
-- `layout_blocks`：达到保护阈值的全局版面框；
-- `adaptive_cutting.protection_intervals`：禁止切割的纵向区间；
-- `adaptive_cutting.blank_bands`：原图连续空白带；
-- `safe_chunks`：最终安全块及其重叠信息；
-- `request_packs`：实际 FinixDoc-VL 请求。
+- `strategy`：本次实际策略；
+- `semantic_headings`：全局标题 ID、层级、坐标和置信度；
+- `semantic_analysis.evidence`：每个标题的完整打分依据；
+- `semantic_cutting`：每个 H2 是整块还是按 H3 切分；
+- `safe_chunks`：同图 legacy 对照结果；
+- `request_packs`：实际请求顺序、正文框、上下文框和标题 ID。
 
-当 `save_yolo_debug=true` 时，`yolo_raw/` 继续保留 Ultralytics 的 `model.predict(save=True)` 原始输出。
-
-## 4. Markdown 标题和拼接
-
-官方模式不使用小模型的 Title 分布提前决定标题层级。FinixDoc-VL 先根据
-可见编号、字号和排版输出 Markdown，随后只对“已经是标题”的行校正井号：
-
-```text
-1 总则          → #
-1.1 投保条件    → ##
-1.1.1 责任范围  → ###
-一、总则        → #
-（一）合同构成  → ##
-```
-
-普通正文即使包含 `2.1` 等编号，也不会被程序提升为标题。
-
-从安全空白带切开的相邻请求直接拼接；只有 `overlap_top > 0` 的兜底请求才执行接缝文本去重，从而避免相邻章节恰好出现相同句子时被误删。
-
-## 5. 调用 FinixDoc-VL
+## 调用 FinixDoc-VL
 
 ```bash
-python main.py run-long \
+/usr/bin/python3 main.py run-long \
   --manifest work/long/dataset_manifest.json \
   --work-dir work/long \
   --credentials-file FinixDoc_VL调用.txt \
@@ -171,37 +145,24 @@ python main.py run-long \
   --output-csv outputs/long_submission.csv
 ```
 
-成功切块和完整图片结果都进入 SQLite。服务器繁忙或超时时，客户端会在 5 个白名单 userId 间轮换，并按第 n 次重试等待 `n × log₂(n)` 秒。
+每个原始回答保存在 `responses/request_*.md`；删除重复上下文标题后、真正参与聚合的版本保存在 `responses/request_*_聚合输入.md`。
 
-## 6. 本地 OCR
+成功结果会即时写入 SQLite。API 繁忙时轮换官方白名单账号，并按第 n 次重试等待 `n × log₂(n)` 秒。
 
-```bash
-PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-long \
-  --manifest work/long/dataset_manifest.json \
-  --work-dir work/local_ocr \
-  --output-csv outputs/long_local_ocr.csv
-```
+## 本地 OCR 备用线
 
-本地模式仍读取同一批 `vlm_requests` 原图块，但不会发出网络请求。大块先
-分成约 2000px 的 OCR 小块；OCR 行映射回原图后，复用 general6 的
-`Title/Text` 框和既有标题规则恢复 Markdown。只有实际存在重叠的请求块
-才做接缝去重。每个 OCR 小块和单图质量报告都会落盘，可断点续跑。
+本地 OCR 代码和旧工作目录都保留。它继续读取 `request_packs`，可用于 API 不可用、下一阶段快速试验或低置信度复核；正式默认后端仍是 FinixDoc-VL。
 
-## 7. 校验与调试
+## 测试
 
 ```bash
-python afac_pipeline/long/工具/工具001_检查准备结果.py \
-  --manifest work/long/dataset_manifest.json
-
-python afac_pipeline/long/工具/工具003_估算请求数量.py \
-  --manifest work/long/dataset_manifest.json
-
-python -m unittest discover -s tests -v
+/usr/bin/python3 -m unittest discover -s tests -v
 ```
 
-检查工具会验证：
+真实单图验证结果位于：
 
-- 原图纵向覆盖是否存在缺口；
-- 请求图是否超过 4096px；
-- 安全空白切口和重叠兜底各有多少；
-- 每张唯一图片的窗口数、保护框数和实际请求数。
+```text
+work/验证/长图语义_v1/输出_v2/
+```
+
+该样例高 30690px，检测出 7 个 H2、47 个 H3 候选，最终生成 13 张请求图；如果每个 H3 单独请求会有 44 张，因此当前实现会在不跨 H2 的前提下合并相邻完整 H3。

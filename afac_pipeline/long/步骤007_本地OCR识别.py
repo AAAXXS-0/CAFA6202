@@ -161,6 +161,14 @@ class LocalLongRecognizer:
         packs = [RecognitionPack.from_dict(raw) for raw in manifest["request_packs"]]
         for index, pack in enumerate(packs, start=1):
             image_path = manifest_path.parent / "vlm_requests" / pack.file_name
+            # semantic 请求图顶部可能粘有 H2/H3 上下文条；本地 OCR 的坐标
+            # 映射仍以原图正文 source_box 为准，因此读取准备阶段保留的正文
+            # 原始块，不能把复合图的标题条误映射到正文顶部。
+            body_part = (
+                manifest_path.parent / "vlm_request_parts" / f"{pack.id}_body.png"
+            )
+            if pack.context_boxes and body_part.is_file():
+                image_path = body_part
             boxes = self.ocr.recognize_path(
                 image_path,
                 f"long/{image_sha256}/{pack.id}/{pack.file_name}",

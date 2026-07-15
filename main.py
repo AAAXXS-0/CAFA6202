@@ -40,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--work-dir", default=Path("work/tables"), type=Path)
     prepare.add_argument("--config", type=Path)
 
-    prepare_long = subparsers.add_parser("prepare-long", help="滑窗检测并自适应安全切分长图")
+    prepare_long = subparsers.add_parser("prepare-long", help="滑窗检测并按 H2/H3 语义准备长图")
     prepare_long.add_argument("--input-dir", required=True, type=Path)
     prepare_long.add_argument("--work-dir", default=Path("work/long"), type=Path)
     prepare_long.add_argument("--config", type=Path)
