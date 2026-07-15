@@ -60,6 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run.add_argument("--request-timeout", type=int, default=240)
     run.add_argument("--max-retries", type=int, default=MAX_RETRY_COUNT)
+    run.add_argument("--workers", type=int, default=1, help="并行识别的唯一图片数")
     run.add_argument("--model", default="FinixDoc-VL")
     run.add_argument("--output-csv", default=Path("outputs/table_submission.csv"), type=Path)
 
@@ -78,6 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     run_long.add_argument("--api-key-env", default="FINIXDOC_API_KEY")
     run_long.add_argument("--request-timeout", type=int, default=240)
     run_long.add_argument("--max-retries", type=int, default=MAX_RETRY_COUNT)
+    run_long.add_argument("--workers", type=int, default=1, help="并行识别的唯一图片数")
     run_long.add_argument("--model", default="FinixDoc-VL")
     run_long.add_argument("--output-csv", default=Path("outputs/long_submission.csv"), type=Path)
 
@@ -236,13 +238,23 @@ def main() -> None:
 
     if args.command == "run-tables":
         pipeline = TablePipeline(_config_for_run(args.config, args.manifest), args.work_dir)
-        results = pipeline.recognize_dataset(args.manifest, _client(args), args.output_csv)
+        results = pipeline.recognize_dataset(
+            args.manifest,
+            _client(args),
+            args.output_csv,
+            max_workers=args.workers,
+        )
         print(f"图表识别完成，共 {len(results)} 张：{args.output_csv}")
         return
 
     if args.command == "run-long":
         pipeline = LongPipeline(_long_config_for_run(args.config, args.manifest), args.work_dir)
-        results = pipeline.recognize_dataset(args.manifest, _client(args), args.output_csv)
+        results = pipeline.recognize_dataset(
+            args.manifest,
+            _client(args),
+            args.output_csv,
+            max_workers=args.workers,
+        )
         print(f"长图识别完成，共 {len(results)} 张：{args.output_csv}")
 
 

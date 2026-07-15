@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -317,6 +319,7 @@ class LongPipeline:
         dataset_manifest_path: str | Path,
         client: FinixDocClient,
         output_csv: str | Path,
+        max_workers: int = 1,
     ) -> dict[str, str]:
         dataset_manifest = _load_json(Path(dataset_manifest_path))
         recognition_digest = hashlib.sha256(
@@ -328,14 +331,20 @@ class LongPipeline:
                 + LONG_PROMPT_VERSION
             ).encode("utf-8")
         ).hexdigest()
-        canonical_results: dict[str, str] = {}
+        if max_workers <= 0:
+            raise ValueError("max_workers 必须大于 0")
+
+        unique_items: dict[str, dict[str, Any]] = {}
         for item in dataset_manifest["items"]:
+            unique_items.setdefault(item["canonical_file_name"], item)
+
+        def recognize_one(item: dict[str, Any]) -> tuple[str, str]:
             canonical_name = item["canonical_file_name"]
-            if canonical_name in canonical_results:
-                continue
             markdown = self.cache.get_image(item["sha256"], recognition_digest)
             if markdown is None:
-                markdown = self._recognize_manifest(Path(item["image_manifest"]), client)
+                markdown = self._recognize_manifest(
+                    Path(item["image_manifest"]), client
+                )
                 self.cache.put_image(
                     item["sha256"],
                     recognition_digest,
@@ -346,7 +355,21 @@ class LongPipeline:
                         "prompt_version": LONG_PROMPT_VERSION,
                     },
                 )
-            canonical_results[canonical_name] = markdown
+            return canonical_name, markdown
+
+        canonical_items = list(unique_items.values())
+        if max_workers == 1 or len(canonical_items) <= 1:
+            pairs = [recognize_one(item) for item in canonical_items]
+        else:
+            worker_count = min(max_workers, len(canonical_items))
+            print(
+                f"[长图并行] {worker_count} 个任务并发识别 "
+                f"{len(canonical_items)} 张唯一图片",
+                flush=True,
+            )
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                pairs = list(executor.map(recognize_one, canonical_items))
+        canonical_results = dict(pairs)
 
         results = {
             item["file_name"]: canonical_results[item["canonical_file_name"]]

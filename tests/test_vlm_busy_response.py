@@ -1,4 +1,7 @@
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Lock
 import unittest
 from unittest.mock import call, patch
 
@@ -82,6 +85,38 @@ class FinixDocBusyResponseTest(unittest.TestCase):
         self.assertEqual(
             mocked_sleep.call_args_list,
             [call(64.0), call(81.0)],
+        )
+
+    def test_parallel_requests_rotate_their_initial_user_ids(self) -> None:
+        users = ["finixA1001", "finixB2002", "finixC3003"]
+        client = FinixDocClient(
+            "https://example.invalid/api",
+            user_id=users[0],
+            user_ids=users,
+            api_key="test-key",
+            max_retries=0,
+        )
+        seen: list[str | None] = []
+        lock = Lock()
+
+        def recognize_once(*args, active_user_id=None, **kwargs):
+            with lock:
+                seen.append(active_user_id)
+            return f"# {active_user_id}"
+
+        with patch.object(client, "_recognize_once", side_effect=recognize_once):
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                results = list(
+                    executor.map(
+                        lambda _: client.recognize(__file__, ""),
+                        range(6),
+                    )
+                )
+
+        self.assertEqual(len(results), 6)
+        self.assertEqual(
+            Counter(seen),
+            Counter({"finixA1001": 2, "finixB2002": 2, "finixC3003": 2}),
         )
 
     def test_quadratic_delay_sequence_starts_at_eight_squared(self) -> None:

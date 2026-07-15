@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import time
+from threading import Lock
 from typing import Any, Sequence
 
 import requests
@@ -127,6 +128,10 @@ class FinixDocClient:
         self.user_ids = list(dict.fromkeys(user_ids or ()))
         self.user_id_env = user_id_env
         self._api_key = api_key
+        # 并发任务共享一个客户端。每张新图片从下一个白名单账号开始，
+        # 失败后再从自己的起点继续轮换，避免 6 个任务同时挤同一账号。
+        self._request_sequence = 0
+        self._request_sequence_lock = Lock()
 
     @classmethod
     def from_official_doc(
@@ -264,9 +269,14 @@ class FinixDocClient:
         users = self._available_user_ids()
         # Chat 协议不使用 userId；保留 None 占位以复用相同的重试循环。
         attempt_users: list[str | None] = users or [None]
+        with self._request_sequence_lock:
+            initial_user_offset = self._request_sequence
+            self._request_sequence += 1
         retry_number = 0
         while True:
-            active_user = attempt_users[retry_number % len(attempt_users)]
+            active_user = attempt_users[
+                (initial_user_offset + retry_number) % len(attempt_users)
+            ]
             try:
                 return self._recognize_once(
                     image_path,
@@ -287,7 +297,9 @@ class FinixDocClient:
                     break
                 retry_number += 1
                 delay = retry_delay_seconds(retry_number)
-                next_user = attempt_users[retry_number % len(attempt_users)]
+                next_user = attempt_users[
+                    (initial_user_offset + retry_number) % len(attempt_users)
+                ]
                 current_user_text = active_user or "无 userId"
                 next_user_text = next_user or "无 userId"
                 print(

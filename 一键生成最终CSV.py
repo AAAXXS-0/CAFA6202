@@ -1,7 +1,7 @@
 """AFAC 2026 一键准备、识别并生成最终 100 行提交 CSV。
 
-直接运行本文件，不需要输入任何命令行参数。API 或网络中断后再次运行即可，
-SQLite 会自动复用已经成功的切片和整图结果。
+直接运行本文件，不需要输入任何命令行参数。默认并行识别 6 张唯一图片；
+API 或网络中断后再次运行即可，SQLite 会复用成功的切片和整图结果。
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from afac_pipeline.table import TableConfig, TablePipeline
 官方接口说明 = 项目根目录 / "FinixDoc_VL调用.txt"
 官方提交模板 = 项目根目录 / "finix_ab_A_submit_mock.csv"
 输出目录 = 项目根目录 / "outputs/最终提交"
+默认并行数 = 6
+最大并行数 = 32
 
 
 def 检查固定文件() -> None:
@@ -116,6 +118,15 @@ def main() -> int:
     print(f"[工作目录] 图表：{table_work}", flush=True)
     print(f"[断点缓存] 长图：{long_work / 'cache.sqlite3'}", flush=True)
     print(f"[断点缓存] 图表：{table_work / 'cache.sqlite3'}", flush=True)
+    workers = int(os.environ.get("FINIXDOC_WORKERS", str(默认并行数)))
+    if not 1 <= workers <= 最大并行数:
+        raise ValueError(
+            f"FINIXDOC_WORKERS 必须位于 1 到 {最大并行数} 之间"
+        )
+    print(
+        f"[API 并行] {workers} 个唯一图片任务；单张图片内部仍按顺序聚合",
+        flush=True,
+    )
     if os.environ.get("AFAC_DRY_RUN") == "1":
         print("[检查模式] 固定文件、模板、配置和工作目录均正常；不切图、不调用 API", flush=True)
         return 0
@@ -151,7 +162,10 @@ def main() -> int:
     try:
         print("[长图识别] 开始调用 FinixDoc-VL", flush=True)
         LongPipeline(long_config, long_work).recognize_dataset(
-            long_manifest, client, long_csv
+            long_manifest,
+            client,
+            long_csv,
+            max_workers=workers,
         )
     except Exception as error:  # 保留另一分支继续积累缓存
         failures.append(f"长图识别失败：{error}")
@@ -160,7 +174,10 @@ def main() -> int:
     try:
         print("[图表识别] 开始调用 FinixDoc-VL", flush=True)
         TablePipeline(table_config, table_work).recognize_dataset(
-            table_manifest, client, table_csv
+            table_manifest,
+            client,
+            table_csv,
+            max_workers=workers,
         )
     except Exception as error:  # 保留长图已完成的缓存
         failures.append(f"图表识别失败：{error}")

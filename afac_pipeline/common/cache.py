@@ -23,7 +23,10 @@ class ResultCache:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=60.0)
+        # 6 个识别线程可能同时命中缓存。WAL 允许读写并行，busy_timeout
+        # 让短暂的写锁排队，而不是把已成功的 API 结果报成 database locked。
+        connection.execute("PRAGMA busy_timeout=60000")
         try:
             yield connection
             connection.commit()
@@ -32,6 +35,8 @@ class ResultCache:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS image_results (

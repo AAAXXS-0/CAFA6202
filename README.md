@@ -47,7 +47,7 @@ python -m pip install -r requirements.txt
 ./一键生成最终CSV.sh
 ```
 
-脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。启动时会打印长图和图表各自的 SQLite 缓存位置；每个成功切片立即落盘，API 繁忙或手动中断后重新运行会跳过已成功切片。
+脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。默认同时识别 6 张唯一图片，可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。启动时会打印长图和图表各自的 SQLite 缓存位置；每个成功切片立即落盘，API 繁忙或手动中断后重新运行会跳过已成功切片。
 
 ## 统一命令行
 
@@ -61,6 +61,8 @@ python main.py --help
 - `prepare-tables` / `run-tables`：准备、识别图表目录；
 - `prepare-long` / `run-long`：准备、识别长图目录；
 - `combine-submissions`：按官方模板顺序合并长图和图表 CSV。
+
+`run-long` 和 `run-tables` 可传 `--workers 6` 并行识别唯一图片；默认命令行值仍为 1，避免手工调试时意外并发。
 
 ## 完全本地 OCR（不调用官方 API）
 
@@ -128,7 +130,7 @@ python main.py run-long \
   --output-csv outputs/long_submission.csv
 ```
 
-如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。官方说明中的 5 个白名单 userId 会在重试时循环切换。第 n 次重试前等待 `(8+n-1)²` 秒，即 `64、81、100……484` 秒；最多重试 15 次，超过后停止。一键脚本可用环境变量 `FINIXDOC_MAX_RETRIES` 把次数调低，但不能超过 15。每个成功切片即时进入当前分支工作目录的 SQLite 缓存。
+如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。官方说明中的 5 个白名单 userId 会在重试时循环切换；并行任务的首次请求也会轮换账号，避免全部挤到同一用户名。第 n 次重试前等待 `(8+n-1)²` 秒，即 `64、81、100……484` 秒；最多重试 15 次，超过后停止。一键脚本可用环境变量 `FINIXDOC_MAX_RETRIES` 把次数调低，但不能超过 15。每个成功切片即时进入当前分支工作目录的 SQLite 缓存。
 
 长图和图表各自生成 50 行 CSV 后，按 100 行官方模板严格合并：
 
