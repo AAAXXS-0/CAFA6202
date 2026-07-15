@@ -53,15 +53,17 @@ class DensitySplitTest(unittest.TestCase):
         self.assertFalse(horizontal)
         self.assertFalse(vertical)
 
-    def test_unequal_double_gap_keeps_only_the_stronger_split(self) -> None:
-        """小块—大块—小块且两带不等宽时，避免把版面过切成三块。"""
+    def test_two_real_gaps_keep_three_tables_even_when_widths_differ(self) -> None:
+        """两条真实分隔带宽度略有不同，也不能为了匹配先验而强行合并。"""
 
         density = np.full((384, 272), 0.25, dtype=np.float32)
         density[71:78, :] = 0.0
         density[307:315, :] = 0.0
         horizontal, vertical = find_density_bands(density)
-        self.assertEqual(len(horizontal), 1)
+        boxes = boxes_from_bands(272, 384, horizontal, vertical, density)
+        self.assertEqual(len(horizontal), 2)
         self.assertFalse(vertical)
+        self.assertEqual(len(boxes), 3)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,13 @@ class InkRegionTest(unittest.TestCase):
         self.assertLessEqual(primary.y1, 150)
         self.assertGreaterEqual(primary.y2, 590)
 
+    def test_fixed_coarse_scale_does_not_depend_on_maximum_side(self) -> None:
+        image = Image.new("RGB", (1000, 700), "white")
+        result = detect_ink_regions(
+            image, coarse_max_side=64, coarse_scale=0.25
+        )
+        self.assertEqual(result.coarse_size, (250, 175))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,7 @@ def detect_ink_regions(
     preview: Image.Image,
     *,
     coarse_max_side: int = 384,
+    coarse_scale: float | None = None,
     ink_threshold: int = 245,
     minimum_density: float = 0.008,
     blur_ratio: float = 0.012,
@@ -65,9 +66,15 @@ def detect_ink_regions(
 
     if not 64 <= coarse_max_side <= 2048:
         raise ValueError("coarse_max_side 应位于 64 到 2048 之间")
+    if coarse_scale is not None and not 0 < coarse_scale <= 1:
+        raise ValueError("coarse_scale 必须位于 (0, 1] 内")
     gray = np.asarray(preview.convert("L"))
     ink = (gray < ink_threshold).astype(np.float32)
-    scale = min(1.0, coarse_max_side / max(preview.size))
+    if coarse_scale is None:
+        scale = min(1.0, coarse_max_side / max(preview.size))
+    else:
+        # 实验可以使用固定二次缩放率，避免不同原图尺寸得到不同像素尺度。
+        scale = coarse_scale
     coarse_width = max(1, round(preview.width * scale))
     coarse_height = max(1, round(preview.height * scale))
     density = cv2.resize(

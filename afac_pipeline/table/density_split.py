@@ -15,6 +15,7 @@ class DensityBand:
     start: int
     end: int
     mean_density: float
+    source: str = "raw"
 
     @property
     def center(self) -> int:
@@ -67,9 +68,17 @@ def _profile_bands(
         1, min(2, round(length * maximum_interrupt_ratio))
     )
     edge_margin = max(1, round(length * edge_margin_ratio))
-    low = _fill_short_interruptions(profile <= maximum_density, maximum_interrupt)
+    raw_low = profile <= maximum_density
+    filled_low = _fill_short_interruptions(raw_low, maximum_interrupt)
+    # 填补标题中断有可能把真正分隔带一路串到页面尾部。原始低谷和填补后的
+    # 宽低谷都参与候选，后续再按平均密度、边缘和内容支撑统一筛选。
+    range_sources: dict[tuple[int, int], set[str]] = {}
+    for item in _runs(raw_low):
+        range_sources.setdefault(item, set()).add("raw")
+    for item in _runs(filled_low):
+        range_sources.setdefault(item, set()).add("filled")
     bands: list[DensityBand] = []
-    for start, end in _runs(low):
+    for (start, end), sources in sorted(range_sources.items()):
         if end - start < minimum_band:
             continue
         if start < edge_margin or end > length - edge_margin:
@@ -94,6 +103,7 @@ def _profile_bands(
                 start=start,
                 end=end,
                 mean_density=band_mean,
+                source="+".join(sorted(sources)),
             )
         )
     return bands
@@ -136,6 +146,14 @@ def _select_axis_bands(
     groups = _cluster_nearby_bands(
         bands, max(4, round(coarse_max_side * cluster_ratio))
     )
+    groups = [
+        group
+        for group in groups
+        if not (
+            len(group) >= 3
+            and all("filled" not in band.source for band in group)
+        )
+    ]
     selected = [
         max(group, key=lambda band: (band.end - band.start, -band.mean_density))
         for group in groups
@@ -146,13 +164,6 @@ def _select_axis_bands(
         if spacing < coarse_max_side * minimum_region_ratio:
             return []
 
-    # 三块呈“小块—大块—小块”且两条低谷只差一个像素时，较窄低谷很容易
-    # 是表头与正文之间的内部留白。只在带宽确实不同的情况下保留更强的一条；
-    # 两条等宽低谷（0cd74f08）仍然都是真正分表线。
-    if len(selected) == 2:
-        widths = [band.end - band.start for band in selected]
-        if widths[0] != widths[1]:
-            selected = [selected[int(widths[1] > widths[0])]]
     return selected
 
 

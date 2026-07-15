@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -38,7 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="墨水分表与黑白边界实验")
     parser.add_argument("--image", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--preview-max-side", type=int, default=1600)
+    parser.add_argument("--analysis-scale", type=float, default=0.20)
+    parser.add_argument("--density-scale", type=float, default=0.25)
+    parser.add_argument("--analysis-max-side", type=int, default=4096)
     return parser.parse_args()
 
 
@@ -81,25 +84,52 @@ def dense_content_box(ink: np.ndarray, projection_ratio: float = 0.06) -> Box:
     )
 
 
-def adaptive_line_segments(
-    ink: np.ndarray,
-    axis: int,
-    minimum_ratio: float,
-    minimum_span_ratio: float = 0.20,
-) -> list[LineSegment]:
-    """按每条线自己的有效跨度计算覆盖率，而不是除以整个外接矩形。
+def content_envelope_mask(ink: np.ndarray) -> np.ndarray:
+    """由整块表格墨水估计二维外形，作为候选线长度的独立分母。
 
-    梯形表右侧有大块白底。旧算法把这些外部白底也放入分母，真实黑线只能
-    得到很低的覆盖率。现在逐行/逐列寻找首尾墨水，并要求有效跨度至少占该
-    方向的 20%，再在这个局部区间内计算黑色覆盖率。
+    先在二维上模糊、闭合文字和单元格，再取得每行/列的表格跨度。候选线
+    自己的首尾黑点不会决定分母，因此一行文字不能把自身包装成“完整黑线”。
     """
 
-    data = ink if axis == 0 else ink.T
+    height, width = ink.shape
+    density = ink.astype(np.float32)
+    blurred = cv2.GaussianBlur(
+        density,
+        (0, 0),
+        sigmaX=max(1.0, width * 0.008),
+        sigmaY=max(1.0, height * 0.008),
+    )
+    mask = (blurred >= 0.015).astype(np.uint8)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (
+            max(3, round(width * 0.015)) | 1,
+            max(3, round(height * 0.015)) | 1,
+        ),
+    )
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2).astype(bool)
+
+
+def adaptive_line_segments(
+    black_ink: np.ndarray,
+    envelope_mask: np.ndarray,
+    axis: int,
+    minimum_ratio: float = 0.90,
+    minimum_span_ratio: float = 0.20,
+) -> list[LineSegment]:
+    """候选线在独立估计的完整表格跨度内必须至少有 90% 黑像素。
+
+    梯形表仍按该行/列在二维包络中的真实长度计算，不把外部白底放入分母；
+    但分母绝不能由候选线自己的首尾黑点生成，否则文字横画会被误判为线。
+    """
+
+    data = black_ink if axis == 0 else black_ink.T
+    envelope = envelope_mask if axis == 0 else envelope_mask.T
     scores = np.zeros(len(data), dtype=np.float32)
     starts = np.zeros(len(data), dtype=np.int32)
     ends = np.zeros(len(data), dtype=np.int32)
-    for index, line in enumerate(data):
-        positions = np.flatnonzero(line)
+    for index, (line, expected) in enumerate(zip(data, envelope)):
+        positions = np.flatnonzero(expected)
         if positions.size == 0:
             continue
         start = int(positions[0])
@@ -108,7 +138,7 @@ def adaptive_line_segments(
             continue
         starts[index] = start
         ends[index] = end
-        scores[index] = float(line[start:end].mean())
+        scores[index] = float(black_ink[index, start:end].mean()) if axis == 0 else float(black_ink[start:end, index].mean())
 
     segments: list[LineSegment] = []
     for run_start, run_end in _runs(scores >= minimum_ratio):
@@ -175,12 +205,27 @@ def keep_interior_centers(centers: list[int], length: int) -> list[int]:
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if not 0 < args.analysis_scale <= 1:
+        raise ValueError("analysis-scale 必须位于 (0, 1] 内")
+    if not 0 < args.density_scale <= 1:
+        raise ValueError("density-scale 必须位于 (0, 1] 内")
     with Image.open(args.image) as source:
-        preview = source.convert("RGB")
-        preview.thumbnail((args.preview_max_side, args.preview_max_side), Image.Resampling.LANCZOS)
+        original_size = source.size
+        analysis_size = (
+            max(1, round(source.width * args.analysis_scale)),
+            max(1, round(source.height * args.analysis_scale)),
+        )
+        if max(analysis_size) > args.analysis_max_side:
+            raise ValueError(
+                f"固定缩放后最长边为 {max(analysis_size)}，超过安全上限 "
+                f"{args.analysis_max_side}；请显式调整 analysis-scale"
+            )
+        preview = source.convert("RGB").resize(
+            analysis_size, Image.Resampling.LANCZOS
+        )
     preview.save(args.output_dir / "001_原始缩略图.png")
 
-    ink_result = detect_ink_regions(preview)
+    ink_result = detect_ink_regions(preview, coarse_scale=args.density_scale)
     density = ink_result.coarse_density
     density_visualization(density).resize(preview.size, Image.Resampling.NEAREST).save(
         args.output_dir / "002_墨水密度图.png"
@@ -211,58 +256,58 @@ def main() -> None:
 
     split_directory = args.output_dir / "切表"
     split_directory.mkdir(exist_ok=True)
-    black_thresholds = (0.45, 0.55, 0.65)
-    black_images = {threshold: preview.copy() for threshold in black_thresholds}
-    black_draws = {
-        threshold: ImageDraw.Draw(image)
-        for threshold, image in black_images.items()
-    }
+    black_image = preview.copy()
     white_image = preview.copy()
     choice_image = preview.copy()
+    black_draw = ImageDraw.Draw(black_image)
     white_draw = ImageDraw.Draw(white_image)
     choice_draw = ImageDraw.Draw(choice_image)
     config = TableConfig(
-        grid_white_threshold=245,
+        grid_white_threshold=225,
         whitespace_blank_ratio=0.01,
-        whitespace_min_band=3,
-        whitespace_dilate_ratio=0.006,
+        whitespace_min_band=1,
+        whitespace_dilate_ratio=0.004,
     )
     reports: list[dict[str, object]] = []
     for index, box in enumerate(preview_boxes):
         table_image = preview.crop((box.x1, box.y1, box.x2, box.y2))
         table_image.save(split_directory / f"table_{index:03d}.png")
-        crop = np.asarray(table_image.convert("L"))
-        outer_ink = crop < config.grid_white_threshold
-        local_box = dense_content_box(outer_ink)
+        gray = np.asarray(table_image.convert("L"))
+        structure_ink = gray < 245
+        black_ink = gray < config.grid_white_threshold
+        local_box = dense_content_box(structure_ink)
         analysis_box = Box(
             box.x1 + local_box.x1,
             box.y1 + local_box.y1,
             box.x1 + local_box.x2,
             box.y1 + local_box.y2,
         )
-        ink = outer_ink[
+        structure_ink = structure_ink[
             local_box.y1 : local_box.y2,
             local_box.x1 : local_box.x2,
         ]
+        black_ink = black_ink[
+            local_box.y1 : local_box.y2,
+            local_box.x1 : local_box.x2,
+        ]
+        envelope = content_envelope_mask(structure_ink)
+        black_rows = adaptive_line_segments(black_ink, envelope, 0, 0.90)
+        black_columns = adaptive_line_segments(black_ink, envelope, 1, 0.90)
+        draw_segments(
+            black_draw,
+            analysis_box,
+            black_rows,
+            black_columns,
+            (0, 180, 0),
+        )
 
-        threshold_lines: dict[
-            float, tuple[list[LineSegment], list[LineSegment]]
-        ] = {}
-        for threshold in black_thresholds:
-            black_rows = adaptive_line_segments(ink, 0, threshold)
-            black_columns = adaptive_line_segments(ink, 1, threshold)
-            threshold_lines[threshold] = (black_rows, black_columns)
-            draw_segments(
-                black_draws[threshold],
-                analysis_box,
-                black_rows,
-                black_columns,
-                (0, 180, 0),
-            )
-
-        raw_white_rows, raw_white_columns = _whitespace_centers(ink, config)
-        white_rows = keep_interior_centers(raw_white_rows, ink.shape[0])
-        white_columns = keep_interior_centers(raw_white_columns, ink.shape[1])
+        raw_white_rows, raw_white_columns = _whitespace_centers(
+            structure_ink, config
+        )
+        white_rows = keep_interior_centers(raw_white_rows, structure_ink.shape[0])
+        white_columns = keep_interior_centers(
+            raw_white_columns, structure_ink.shape[1]
+        )
         draw_full_lines(
             white_draw,
             analysis_box,
@@ -271,15 +316,14 @@ def main() -> None:
             (255, 128, 0),
         )
 
-        black_rows, black_columns = threshold_lines[0.55]
         reliable_line_count = 5
         row_source = (
-            "black-line-0.55"
+            "black-line-0.90"
             if len(black_rows) >= reliable_line_count
             else "white-band"
         )
         column_source = (
-            "black-line-0.55"
+            "black-line-0.90"
             if len(black_columns) >= reliable_line_count
             else "white-band"
         )
@@ -297,13 +341,8 @@ def main() -> None:
                 "table_index": index,
                 "split_box": box.to_dict(),
                 "analysis_box": analysis_box.to_dict(),
-                "black_threshold_counts": {
-                    str(threshold): {
-                        "rows": len(threshold_lines[threshold][0]),
-                        "columns": len(threshold_lines[threshold][1]),
-                    }
-                    for threshold in black_thresholds
-                },
+                "black_rows": len(black_rows),
+                "black_columns": len(black_columns),
                 "white_rows": len(white_rows),
                 "white_columns": len(white_columns),
                 "filtered_edge_white_rows": len(raw_white_rows) - len(white_rows),
@@ -312,17 +351,20 @@ def main() -> None:
                 "selected_column_source": column_source,
             }
         )
-    black_images[0.45].save(args.output_dir / "004_局部黑线_45.png")
-    black_images[0.55].save(args.output_dir / "005_局部黑线_55.png")
-    black_images[0.65].save(args.output_dir / "006_局部黑线_65.png")
-    white_image.save(args.output_dir / "007_局部白带.png")
-    choice_image.save(args.output_dir / "008_最终边界.png")
+    black_image.save(args.output_dir / "004_整线90黑线.png")
+    white_image.save(args.output_dir / "005_局部白带.png")
+    choice_image.save(args.output_dir / "006_最终边界.png")
     report = {
         "image": str(args.image.resolve()),
+        "original_size": list(original_size),
+        "analysis_size": list(preview.size),
+        "density_size": [density.shape[1], density.shape[0]],
         "parameters": {
-            "gray_ink_threshold": 245,
-            "black_line_ratios": list(black_thresholds),
-            "selected_black_line_ratio": 0.55,
+            "analysis_scale": args.analysis_scale,
+            "density_scale_from_analysis": args.density_scale,
+            "density_scale_from_original": args.analysis_scale * args.density_scale,
+            "black_gray_threshold": config.grid_white_threshold,
+            "black_line_ratio": 0.90,
             "white_band_ink_ratio": 0.01,
             "density_split_row_ratio": 0.03,
             "density_split_band_mean_ratio": 0.02,
