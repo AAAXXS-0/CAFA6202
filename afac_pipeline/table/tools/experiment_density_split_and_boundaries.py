@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-scale", type=float, default=0.20)
     parser.add_argument("--density-scale", type=float, default=0.25)
     parser.add_argument("--analysis-max-side", type=int, default=4096)
+    parser.add_argument(
+        "--save-intermediates",
+        action="store_true",
+        help="保存每张分表切图的完整检测中间产物",
+    )
     return parser.parse_args()
 
 
@@ -202,6 +207,363 @@ def keep_interior_centers(centers: list[int], length: int) -> list[int]:
     return [center for center in centers if margin < center < length - margin]
 
 
+def binary_preview(mask: np.ndarray) -> Image.Image:
+    """将 True=墨水 的布尔图保存成便于查看的黑白图。"""
+
+    return Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
+
+
+def mask_overlay(
+    image: Image.Image,
+    mask: np.ndarray,
+    color: tuple[int, int, int] = (0, 180, 255),
+    alpha: int = 75,
+) -> Image.Image:
+    """把二维包络半透明覆盖到原图，说明实际用作分母的区域。"""
+
+    result = image.convert("RGBA")
+    layer = Image.new("RGBA", result.size, (0, 0, 0, 0))
+    colored = Image.new("RGBA", result.size, (*color, alpha))
+    layer.paste(colored, (0, 0), Image.fromarray(mask.astype(np.uint8) * 255))
+    return Image.alpha_composite(result, layer).convert("RGB")
+
+
+def whitespace_debug_data(
+    ink: np.ndarray, config: TableConfig
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """复现 grid._whitespace_centers 的文字扩张，返回可视化和精确投影。"""
+
+    binary = ink.astype(np.uint8)
+    horizontal_kernel = max(
+        3, round(ink.shape[1] * config.whitespace_dilate_ratio)
+    )
+    vertical_kernel = max(
+        3, round(ink.shape[0] * config.whitespace_dilate_ratio)
+    )
+    for_rows = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT, (horizontal_kernel, 1)
+        ),
+    )
+    for_columns = cv2.dilate(
+        binary,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT, (1, vertical_kernel)
+        ),
+    )
+    return (
+        for_rows,
+        for_columns,
+        for_rows.mean(axis=1),
+        for_columns.mean(axis=0),
+        horizontal_kernel,
+        vertical_kernel,
+    )
+
+
+def profile_plot(
+    values: np.ndarray,
+    output_path: Path,
+    threshold: float,
+    zoom_maximum: float = 0.05,
+) -> None:
+    """画 0～5% 的墨水比例曲线，红线是 1% 白带上限。"""
+
+    width, height = 1200, 360
+    margin = 30
+    canvas = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle(
+        (margin, margin, width - margin, height - margin),
+        outline=(80, 80, 80),
+        width=1,
+    )
+    threshold_y = height - margin - round(
+        min(threshold, zoom_maximum)
+        / zoom_maximum
+        * (height - 2 * margin)
+    )
+    draw.line(
+        (margin, threshold_y, width - margin, threshold_y),
+        fill=(255, 0, 0),
+        width=2,
+    )
+    points: list[tuple[int, int]] = []
+    for index, value in enumerate(values):
+        x = margin + round(
+            index / max(1, len(values) - 1) * (width - 2 * margin)
+        )
+        y = height - margin - round(
+            min(float(value), zoom_maximum)
+            / zoom_maximum
+            * (height - 2 * margin)
+        )
+        points.append((x, y))
+    if len(points) >= 2:
+        draw.line(points, fill=(0, 80, 220), width=1)
+    canvas.save(output_path)
+
+
+def draw_local_candidates(
+    image: Image.Image,
+    raw_rows: list[int],
+    raw_columns: list[int],
+    kept_rows: list[int],
+    kept_columns: list[int],
+) -> tuple[Image.Image, Image.Image]:
+    """分别绘制过滤前候选，以及保留/删除后的对比。"""
+
+    box = Box(0, 0, image.width, image.height)
+    before = image.copy()
+    draw_full_lines(
+        ImageDraw.Draw(before),
+        box,
+        raw_rows,
+        raw_columns,
+        (255, 128, 0),
+        1,
+    )
+    after = image.copy()
+    after_draw = ImageDraw.Draw(after)
+    removed_rows = sorted(set(raw_rows) - set(kept_rows))
+    removed_columns = sorted(set(raw_columns) - set(kept_columns))
+    draw_full_lines(
+        after_draw,
+        box,
+        removed_rows,
+        removed_columns,
+        (255, 0, 0),
+        2,
+    )
+    draw_full_lines(
+        after_draw,
+        box,
+        kept_rows,
+        kept_columns,
+        (0, 180, 0),
+        1,
+    )
+    return before, after
+
+
+def save_table_intermediates(
+    *,
+    output_directory: Path,
+    table_index: int,
+    table_image: Image.Image,
+    local_box: Box,
+    analysis_box: Box,
+    structure_ink: np.ndarray,
+    black_ink: np.ndarray,
+    envelope: np.ndarray,
+    black_rows: list[LineSegment],
+    black_columns: list[LineSegment],
+    raw_white_rows: list[int],
+    raw_white_columns: list[int],
+    white_rows: list[int],
+    white_columns: list[int],
+    row_source: str,
+    column_source: str,
+    config: TableConfig,
+) -> None:
+    """保存单张分表切图从输入到最终边界的所有关键中间状态。"""
+
+    table_directory = output_directory / f"table_{table_index:03d}"
+    table_directory.mkdir(parents=True, exist_ok=True)
+    table_image.save(table_directory / "001_分表切图.png")
+
+    location = table_image.convert("RGBA")
+    shade = Image.new("RGBA", location.size, (255, 0, 0, 55))
+    visible = Image.new("L", location.size, 255)
+    ImageDraw.Draw(visible).rectangle(
+        (local_box.x1, local_box.y1, local_box.x2, local_box.y2),
+        fill=0,
+    )
+    location = Image.composite(shade, location, visible)
+    location_draw = ImageDraw.Draw(location)
+    location_draw.rectangle(
+        (local_box.x1, local_box.y1, local_box.x2, local_box.y2),
+        outline=(160, 0, 255, 255),
+        width=3,
+    )
+    location.convert("RGB").save(
+        table_directory / "002_分表切图中的实际分析框.png"
+    )
+
+    analysis_image = table_image.crop(
+        (local_box.x1, local_box.y1, local_box.x2, local_box.y2)
+    ).convert("RGB")
+    analysis_image.save(table_directory / "003_实际分析区域原图.png")
+    binary_preview(structure_ink).save(
+        table_directory / "004_结构墨水_灰度低于245.png"
+    )
+    binary_preview(black_ink).save(
+        table_directory / "005_黑线墨水_灰度低于225.png"
+    )
+    binary_preview(envelope).save(
+        table_directory / "006_二维表格包络二值图.png"
+    )
+    mask_overlay(analysis_image, envelope).save(
+        table_directory / "007_二维表格包络覆盖位置.png"
+    )
+
+    black_image = analysis_image.copy()
+    draw_segments(
+        ImageDraw.Draw(black_image),
+        Box(0, 0, analysis_image.width, analysis_image.height),
+        black_rows,
+        black_columns,
+        (0, 180, 0),
+        1,
+    )
+    black_image.save(table_directory / "008_整线90黑线候选.png")
+
+    (
+        for_rows,
+        for_columns,
+        row_ratios,
+        column_ratios,
+        horizontal_kernel,
+        vertical_kernel,
+    ) = whitespace_debug_data(structure_ink, config)
+    binary_preview(for_rows).save(
+        table_directory / "009_找横向白带_文字左右扩张后.png"
+    )
+    binary_preview(for_columns).save(
+        table_directory / "010_找纵向白带_文字上下扩张后.png"
+    )
+
+    edge_image = analysis_image.convert("RGBA")
+    edge_layer = Image.new("RGBA", edge_image.size, (0, 0, 0, 0))
+    edge_draw = ImageDraw.Draw(edge_layer)
+    row_margin = max(8, round(analysis_image.height * 0.03))
+    column_margin = max(8, round(analysis_image.width * 0.03))
+    edge_draw.rectangle(
+        (0, 0, analysis_image.width, row_margin),
+        fill=(255, 0, 0, 70),
+    )
+    edge_draw.rectangle(
+        (
+            0,
+            analysis_image.height - row_margin,
+            analysis_image.width,
+            analysis_image.height,
+        ),
+        fill=(255, 0, 0, 70),
+    )
+    edge_draw.rectangle(
+        (0, 0, column_margin, analysis_image.height),
+        fill=(255, 0, 0, 70),
+    )
+    edge_draw.rectangle(
+        (
+            analysis_image.width - column_margin,
+            0,
+            analysis_image.width,
+            analysis_image.height,
+        ),
+        fill=(255, 0, 0, 70),
+    )
+    Image.alpha_composite(edge_image, edge_layer).convert("RGB").save(
+        table_directory / "011_红色为3%或8像素外沿排除区.png"
+    )
+
+    before, after = draw_local_candidates(
+        analysis_image,
+        raw_white_rows,
+        raw_white_columns,
+        white_rows,
+        white_columns,
+    )
+    before.save(table_directory / "012_外沿过滤前全部白带.png")
+    after.save(
+        table_directory / "013_外沿过滤后_绿色保留_红色删除.png"
+    )
+    profile_plot(
+        row_ratios,
+        table_directory / "014_横向白带墨水比例_红线为1%.png",
+        config.whitespace_blank_ratio,
+    )
+    profile_plot(
+        column_ratios,
+        table_directory / "015_纵向白带墨水比例_红线为1%.png",
+        config.whitespace_blank_ratio,
+    )
+    (table_directory / "014_横向白带墨水比例.csv").write_text(
+        "position,ink_ratio\n"
+        + "\n".join(
+            f"{index},{float(value):.8f}"
+            for index, value in enumerate(row_ratios)
+        ),
+        encoding="utf-8",
+    )
+    (table_directory / "015_纵向白带墨水比例.csv").write_text(
+        "position,ink_ratio\n"
+        + "\n".join(
+            f"{index},{float(value):.8f}"
+            for index, value in enumerate(column_ratios)
+        ),
+        encoding="utf-8",
+    )
+
+    final_image = analysis_image.copy()
+    final_draw = ImageDraw.Draw(final_image)
+    if row_source.startswith("black"):
+        draw_segments(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), black_rows, [], (0, 180, 0), 1)
+    else:
+        draw_full_lines(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), white_rows, [], (255, 128, 0), 1)
+    if column_source.startswith("black"):
+        draw_segments(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), [], black_columns, (0, 180, 0), 1)
+    else:
+        draw_full_lines(final_draw, Box(0, 0, analysis_image.width, analysis_image.height), [], white_columns, (255, 128, 0), 1)
+    final_image.save(table_directory / "016_当前规则最终边界.png")
+
+    removed_rows = sorted(set(raw_white_rows) - set(white_rows))
+    removed_columns = sorted(set(raw_white_columns) - set(white_columns))
+    diagnostic = {
+        "table_index": table_index,
+        "split_image_size": list(table_image.size),
+        "analysis_box_in_split": local_box.to_dict(),
+        "analysis_box_in_full_analysis_image": analysis_box.to_dict(),
+        "structure_ink_gray_threshold": 245,
+        "black_ink_gray_threshold": config.grid_white_threshold,
+        "black_line_required_ratio": 0.90,
+        "white_band_maximum_ink_ratio": config.whitespace_blank_ratio,
+        "white_band_minimum_thickness": config.whitespace_min_band,
+        "horizontal_detection_dilate_kernel": [horizontal_kernel, 1],
+        "vertical_detection_dilate_kernel": [1, vertical_kernel],
+        "row_edge_margin": row_margin,
+        "column_edge_margin": column_margin,
+        "raw_white_rows": raw_white_rows,
+        "raw_white_columns": raw_white_columns,
+        "kept_white_rows": white_rows,
+        "kept_white_columns": white_columns,
+        "removed_white_rows": removed_rows,
+        "removed_white_columns": removed_columns,
+        "black_rows": [line.__dict__ for line in black_rows],
+        "black_columns": [line.__dict__ for line in black_columns],
+        "selected_row_source": row_source,
+        "selected_column_source": column_source,
+        "global_kept_horizontal_lines": [
+            analysis_box.y1 + value for value in white_rows
+        ],
+        "global_kept_vertical_lines": [
+            analysis_box.x1 + value for value in white_columns
+        ],
+        "global_removed_horizontal_lines": [
+            analysis_box.y1 + value for value in removed_rows
+        ],
+        "global_removed_vertical_lines": [
+            analysis_box.x1 + value for value in removed_columns
+        ],
+    }
+    (table_directory / "诊断数据.json").write_text(
+        json.dumps(diagnostic, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +615,7 @@ def main() -> None:
         split_draw.rectangle((box.x1, box.y1, box.x2, box.y2), outline=(0, 80, 255, 255), width=4)
         split_draw.text((box.x1 + 5, box.y1 + 5), f"table-{index + 1}", fill=(0, 80, 255, 255))
     split_image.save(args.output_dir / "003_低密度分表.png")
+    analysis_overview = split_image.copy()
 
     split_directory = args.output_dir / "切表"
     split_directory.mkdir(exist_ok=True)
@@ -336,6 +699,38 @@ def main() -> None:
         else:
             draw_full_lines(choice_draw, analysis_box, [], white_columns, (255, 128, 0), 1)
 
+        if args.save_intermediates:
+            overview_draw = ImageDraw.Draw(analysis_overview)
+            overview_draw.rectangle(
+                (
+                    analysis_box.x1,
+                    analysis_box.y1,
+                    analysis_box.x2,
+                    analysis_box.y2,
+                ),
+                outline=(160, 0, 255),
+                width=3,
+            )
+            save_table_intermediates(
+                output_directory=args.output_dir / "中间产物",
+                table_index=index,
+                table_image=table_image,
+                local_box=local_box,
+                analysis_box=analysis_box,
+                structure_ink=structure_ink,
+                black_ink=black_ink,
+                envelope=envelope,
+                black_rows=black_rows,
+                black_columns=black_columns,
+                raw_white_rows=raw_white_rows,
+                raw_white_columns=raw_white_columns,
+                white_rows=white_rows,
+                white_columns=white_columns,
+                row_source=row_source,
+                column_source=column_source,
+                config=config,
+            )
+
         reports.append(
             {
                 "table_index": index,
@@ -354,6 +749,10 @@ def main() -> None:
     black_image.save(args.output_dir / "004_整线90黑线.png")
     white_image.save(args.output_dir / "005_局部白带.png")
     choice_image.save(args.output_dir / "006_最终边界.png")
+    if args.save_intermediates:
+        analysis_overview.save(
+            args.output_dir / "007_蓝色分表_紫色实际分析框.png"
+        )
     report = {
         "image": str(args.image.resolve()),
         "original_size": list(original_size),
