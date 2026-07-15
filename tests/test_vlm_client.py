@@ -1,12 +1,28 @@
 import unittest
 
 from afac_pipeline.common.vlm_client import (
+    CHAT_PROTOCOL,
     FinixDocTemporaryError,
+    OFFICIAL_PROTOCOL,
     parse_official_response,
+    select_request_prompt,
 )
 
 
 class FinixDocClientTest(unittest.TestCase):
+    def test_official_request_does_not_even_build_a_prompt(self) -> None:
+        calls = 0
+
+        def build_prompt() -> str:
+            nonlocal calls
+            calls += 1
+            return "不应生成"
+
+        self.assertEqual(select_request_prompt(OFFICIAL_PROTOCOL, build_prompt), "")
+        self.assertEqual(calls, 0)
+        self.assertEqual(select_request_prompt(CHAT_PROTOCOL, build_prompt), "不应生成")
+        self.assertEqual(calls, 1)
+
     def test_official_nested_response_and_fence_are_parsed(self) -> None:
         payload = {
             "success": True,

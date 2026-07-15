@@ -42,7 +42,11 @@ from .步骤004_自适应安全切块 import (
 )
 from ..common.models import Box
 from ..common.submission import write_submission
-from ..common.vlm_client import FinixDocClient
+from ..common.vlm_client import (
+    CHAT_PROTOCOL,
+    FinixDocClient,
+    select_request_prompt,
+)
 
 
 LONG_PROMPT_VERSION = "long-markdown-v5-independent-ink-style"
@@ -302,7 +306,12 @@ class LongPipeline:
         for index, raw_pack in enumerate(raw_packs, start=1):
             pack = RecognitionPack.from_dict(raw_pack)
             crop_path = manifest_path.parent / "vlm_requests" / pack.file_name
-            prompt = build_pack_prompt(pack)
+            # 官方 multipart 文档没有 prompt 字段：官方模式连提示词都不生成。
+            # 只有本地 Chat Completions 兼容服务才使用自定义提示词。
+            prompt = select_request_prompt(
+                getattr(client, "protocol", CHAT_PROTOCOL),
+                lambda: build_pack_prompt(pack),
+            )
             image_bytes = crop_path.read_bytes()
             cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
             markdown = self.cache.get_tile(cache_key)

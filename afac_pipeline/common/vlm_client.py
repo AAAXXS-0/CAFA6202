@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import time
 from threading import Lock
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import requests
 
@@ -41,6 +41,17 @@ class FinixDocTemporaryError(RuntimeError):
 
 class FinixDocPermanentError(RuntimeError):
     """凭据、字段或业务响应错误，原样重试通常不会恢复。"""
+
+
+def select_request_prompt(
+    protocol: str,
+    prompt_factory: Callable[[], str],
+) -> str:
+    """官方文件接口没有 prompt 字段；只有兼容接口才生成提示词。"""
+
+    if protocol == OFFICIAL_PROTOCOL:
+        return ""
+    return prompt_factory()
 
 
 def _strip_markdown_fence(text: str) -> str:

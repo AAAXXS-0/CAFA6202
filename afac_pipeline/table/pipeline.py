@@ -38,7 +38,11 @@ from .v6_structure import (
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
 from .tiling import plan_region_tiles
-from ..common.vlm_client import FinixDocClient
+from ..common.vlm_client import (
+    CHAT_PROTOCOL,
+    FinixDocClient,
+    select_request_prompt,
+)
 
 
 PROMPT_VERSION = "table-structured-html-v2"
@@ -564,7 +568,11 @@ class TablePipeline:
             for raw_tile in region["tiles"]:
                 tile = self._tile_from_dict(raw_tile)
                 tile_path = manifest_path.parent / "tiles" / tile.file_name
-                prompt = build_table_prompt(tile)
+                # 官方 multipart 只上传图片和三个文本字段，不生成、不发送 prompt。
+                prompt = select_request_prompt(
+                    getattr(client, "protocol", CHAT_PROTOCOL),
+                    lambda: build_table_prompt(tile),
+                )
                 image_bytes = tile_path.read_bytes()
                 cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
                 markdown = self.cache.get_tile(cache_key)
