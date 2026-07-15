@@ -63,7 +63,7 @@ class LongSemanticTest(unittest.TestCase):
         ]
         headings, evidence, debug = self._analyze(specs, titles)
         self.assertEqual([item.level for item in headings], [1, 2, 3, 2, 3])
-        self.assertEqual(debug["method"], "strict-general6+independent-full-width-ink+style-clustering-v2")
+        self.assertEqual(debug["method"], "strict-general6+guarded-independent-ink+toc-isolation-v3")
         self.assertEqual(debug["h2_count"], 2)
         self.assertTrue(debug["selected_h2_style_ids"])
         self.assertTrue(
@@ -91,6 +91,104 @@ class LongSemanticTest(unittest.TestCase):
         self.assertEqual(debug["ink_only_candidate_count"], 1)
         self.assertEqual([item.level for item in headings], [2])
         self.assertEqual(evidence[0].source, "ink")
+
+    def test_oversized_connected_ink_is_rejected_as_table_like_region(self) -> None:
+        giant = Box(40, 700, 560, 1400)
+        headings, evidence, debug = self._analyze([(giant, 700)], [])
+        rejected = [item for item in evidence if item.source == "ink"]
+
+        self.assertEqual(debug["oversized_ink_rejected_count"], 1)
+        self.assertEqual(debug["h2_count"], 0)
+        self.assertTrue(debug["fallback_required"])
+        self.assertEqual(len(rejected), 1)
+        self.assertFalse(rejected[0].eligible_for_style)
+        self.assertIn("墨迹块过高", rejected[0].rejection_reason or "")
+        self.assertFalse(any(item.level == 2 for item in headings))
+
+    def test_small_title_style_does_not_get_promoted_to_h2(self) -> None:
+        small = Box(40, 700, 300, 730)
+        headings, evidence, debug = self._analyze(
+            [(small, 9)],
+            [block("small", "Title", small, confidence=0.90)],
+        )
+
+        self.assertTrue(any(item.eligible_for_style for item in evidence))
+        self.assertEqual(debug["h2_count"], 0)
+        self.assertTrue(debug["fallback_required"])
+        self.assertFalse(any(item.level == 2 for item in headings))
+
+    def test_overlapping_model_candidates_keep_only_one_boundary(self) -> None:
+        title_ink = Box(40, 700, 300, 730)
+        headings, evidence, debug = self._analyze(
+            [(title_ink, 20)],
+            [
+                block("dup_a", "Title", Box(40, 700, 300, 730), confidence=0.91),
+                block("dup_b", "Title", Box(45, 705, 305, 735), confidence=0.88),
+            ],
+        )
+
+        self.assertEqual(debug["overlap_rejected_candidate_count"], 1)
+        self.assertEqual(debug["h2_count"], 1)
+        self.assertEqual(sum(item.eligible_for_style for item in evidence), 1)
+        self.assertEqual(sum(item.level == 2 for item in headings), 1)
+
+    def test_toc_isolated_from_body_styles_and_packed_separately(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        image = Image.new("RGB", (600, 2048), "white")
+        draw = ImageDraw.Draw(image)
+
+        # 第一处正式居中标题是目录标题，中间十二行模拟目录条目。
+        draw.rectangle((160, 30, 440, 45), fill="black")
+        for y in range(120, 504, 32):
+            draw.rectangle((50, y, 550, y + 7), fill="black")
+        # 第二个低置信度大框覆盖三行居中的文档主标题。
+        for y in (600, 624, 648):
+            draw.rectangle((120, y, 480, y + 11), fill="black")
+        draw.rectangle((40, 760, 300, 779), fill="black")
+        for y in range(900, 1300, 24):
+            draw.rectangle((50, y, 550, y + 7), fill="black")
+
+        image_path = root / "window.png"
+        image.save(image_path)
+        blocks = [
+            block("toc_title", "Title", Box(160, 25, 440, 50), confidence=0.90),
+            block("document_title", "Title", Box(100, 590, 500, 675), confidence=0.45),
+            block("h2", "Title", Box(40, 750, 300, 790), confidence=0.90),
+            block("body", "Text", Box(50, 890, 550, 1320), confidence=0.90),
+        ]
+        window = DetectionWindow(0, 0, 2048, 0, 2048, image_path.name)
+        config = LongConfig(backend="pillow")
+        headings, evidence, debug = analyze_semantic_headings(
+            blocks, 600, [image_path], [window], config
+        )
+
+        self.assertIsNotNone(debug["toc_region"])
+        self.assertEqual(debug["toc_count"], 1)
+        self.assertGreater(debug["toc_rejected_candidate_count"], 0)
+        self.assertIn("semantic_toc", {item.role for item in headings})
+        self.assertIn("semantic_h1", {item.role for item in headings})
+        self.assertFalse(
+            any(item.level == 2 and item.box.y1 < 700 for item in headings)
+        )
+
+        packs, cutting = build_semantic_recognition_packs(
+            headings,
+            blocks,
+            [0.1] * 2048,
+            600,
+            2048,
+            config,
+        )
+        self.assertEqual(cutting["toc_request_count"], 1)
+        self.assertIn("table_of_contents", {item.semantic_role for item in packs})
+        self.assertTrue(
+            all(
+                not (item.source_box.y1 < 590 < item.source_box.y2)
+                for item in packs
+            )
+        )
 
     def test_no_reliable_h2_requests_real_fallback(self) -> None:
         ordinary = Box(40, 700, 500, 720)

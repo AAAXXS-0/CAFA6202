@@ -242,6 +242,83 @@ def _is_centered(box: Box, image_width: int, config: LongConfig) -> bool:
     return abs(left - right) <= image_width * config.center_tolerance_ratio
 
 
+def _has_balanced_center(box: Box, image_width: int, config: LongConfig) -> bool:
+    """只判断左右是否对称，不因标题较宽就把多行文档主标题排除。"""
+
+    left = box.x1
+    right = image_width - box.x2
+    return (
+        box.width <= image_width * config.semantic_toc_anchor_max_width_ratio
+        and abs(left - right) <= image_width * config.center_tolerance_ratio
+    )
+
+
+def _detect_toc_region(
+    blocks: list[LayoutBlock],
+    lines: list[InkLine],
+    body_height: float,
+    image_width: int,
+    image_height: int,
+    config: LongConfig,
+) -> dict[str, Any] | None:
+    """寻找“目录标题在前、文档主标题在后”的双居中锚点。
+
+    这里只借用低阈值 Title 框找第二个大范围主标题，不把它提升为正式模型
+    标题。为了避免把正文中的居中句子误当目录边界，第一锚点必须达到正式
+    0.60 阈值且位于图像顶部；第二锚点必须明显更高，并且二者之间至少包含
+    若干视觉文字行。
+    """
+
+    anchors = sorted(
+        (
+            item
+            for item in blocks
+            if item.label == "Title"
+            and item.confidence >= config.yolo_base_confidence
+            and _has_balanced_center(item.box, image_width, config)
+        ),
+        key=lambda item: (item.box.y1, item.box.x1),
+    )
+    if len(anchors) < 2:
+        return None
+    top_limit = min(config.window_height, int(image_height * 0.04))
+    first_choices = [
+        item
+        for item in anchors
+        if item.box.y1 <= top_limit
+        and item.confidence >= config.title_confidence
+        and item.box.height >= body_height * config.semantic_min_heading_ratio
+    ]
+    for first in first_choices:
+        for second in anchors:
+            if second.box.y1 <= first.box.y2 + body_height * 8:
+                continue
+            if second.box.y1 > first.box.y1 + config.window_height * 4:
+                break
+            if (
+                second.box.height
+                < body_height * config.semantic_toc_second_anchor_min_height_ratio
+            ):
+                continue
+            between = [
+                line
+                for line in lines
+                if first.box.y2 <= line.box.y1 < second.box.y1
+            ]
+            if len(between) < config.semantic_toc_min_line_count:
+                continue
+            return {
+                "detected": True,
+                "toc_box": Box(0, first.box.y1, image_width, second.box.y1),
+                "toc_title_box": first.box,
+                "document_h1_box": second.box,
+                "toc_title_block_id": first.id,
+                "document_h1_block_id": second.id,
+                "line_count": len(between),
+            }
+    return None
+
+
 def _matching_ink_lines(
     box: Box, lines: list[InkLine], body_height: float
 ) -> list[InkLine]:
@@ -293,7 +370,20 @@ def _initial_candidates(
             if matched
             else 0.0
         )
-        eligible = bool(matched and ratio >= config.semantic_model_title_min_ratio)
+        eligible = bool(
+            matched
+            and config.semantic_model_title_min_ratio
+            <= ratio
+            <= config.semantic_title_max_height_ratio
+        )
+        if not matched:
+            rejection = "未匹配到独立墨迹行"
+        elif ratio < config.semantic_model_title_min_ratio:
+            rejection = "实际墨迹字号与正文过于接近"
+        elif ratio > config.semantic_title_max_height_ratio:
+            rejection = "墨迹块过高，更像表格、图片或多行粘连区域"
+        else:
+            rejection = None
         candidates.append(
             TitleEvidence(
                 candidate_id=f"model_title_{index:04d}",
@@ -310,11 +400,7 @@ def _initial_candidates(
                 strict_model_support=True,
                 independent_ink_support=bool(matched),
                 eligible_for_style=eligible,
-                rejection_reason=(
-                    None
-                    if eligible
-                    else "未匹配到独立墨迹行或字号与正文过于接近"
-                ),
+                rejection_reason=rejection,
             )
         )
 
@@ -325,11 +411,11 @@ def _initial_candidates(
             continue
         ratio = line.height / body_height
         whitespace = (line.gap_above + line.gap_below) / body_height
-        if (
-            ratio < config.semantic_ink_only_title_ratio
-            or whitespace < config.semantic_ink_only_min_whitespace_ratio
-        ):
+        if ratio < config.semantic_ink_only_title_ratio:
             continue
+        if whitespace < config.semantic_ink_only_min_whitespace_ratio:
+            continue
+        too_tall = ratio > config.semantic_title_max_height_ratio
         candidates.append(
             TitleEvidence(
                 candidate_id=f"ink_title_{line.id}",
@@ -345,10 +431,98 @@ def _initial_candidates(
                 centered=_is_centered(line.box, image_width, config),
                 strict_model_support=False,
                 independent_ink_support=True,
-                eligible_for_style=True,
+                eligible_for_style=not too_tall,
+                rejection_reason=(
+                    "墨迹块过高，更像表格、图片或多行粘连区域"
+                    if too_tall
+                    else None
+                ),
             )
         )
     return sorted(candidates, key=lambda item: (item.box.y1, item.box.x1))
+
+
+def _exclude_toc_and_deduplicate(
+    candidates: list[TitleEvidence],
+    toc: dict[str, Any] | None,
+    config: LongConfig,
+) -> tuple[list[TitleEvidence], int, int]:
+    """目录候选退出正文投票，并在原图坐标上删除滑窗重复候选。"""
+
+    result = list(candidates)
+    toc_rejected = 0
+    if toc is not None:
+        toc_box: Box = toc["toc_box"]
+        for index, item in enumerate(result):
+            if item.box.y2 > toc_box.y1 and item.box.y1 < toc_box.y2:
+                if item.eligible_for_style:
+                    toc_rejected += 1
+                result[index] = replace(
+                    item,
+                    eligible_for_style=False,
+                    rejection_reason="位于目录区域，只保留图像，不参与正文标题投票",
+                )
+
+    def evidence_priority(item: TitleEvidence) -> tuple[float, ...]:
+        # 有严格模型支持优先；同类证据再比较置信度、留白和较小的框高度。
+        return (
+            float(item.strict_model_support),
+            item.model_confidence,
+            item.whitespace_ratio,
+            -float(item.box.height),
+        )
+
+    accepted: list[int] = []
+    overlap_rejected = 0
+    order = sorted(
+        range(len(result)),
+        key=lambda index: (result[index].box.y1, result[index].box.x1),
+    )
+    for index in order:
+        item = result[index]
+        if not item.eligible_for_style:
+            continue
+        duplicate_index: int | None = None
+        for other_index in accepted:
+            other = result[other_index]
+            vertical = _axis_overlap(
+                item.box.y1, item.box.y2, other.box.y1, other.box.y2
+            )
+            horizontal = _axis_overlap(
+                item.box.x1, item.box.x2, other.box.x1, other.box.x2
+            )
+            if (
+                vertical / max(1, min(item.box.height, other.box.height))
+                >= config.semantic_candidate_overlap_ratio
+                and horizontal / max(1, min(item.box.width, other.box.width))
+                >= config.semantic_candidate_overlap_ratio
+            ):
+                duplicate_index = other_index
+                break
+        if duplicate_index is None:
+            accepted.append(index)
+            continue
+        other = result[duplicate_index]
+        if evidence_priority(item) > evidence_priority(other):
+            result[duplicate_index] = replace(
+                other,
+                eligible_for_style=False,
+                rejection_reason=(
+                    f"与 {item.candidate_id} 在原图中重叠，判为滑窗重复"
+                ),
+            )
+            accepted.remove(duplicate_index)
+            accepted.append(index)
+        else:
+            result[index] = replace(
+                item,
+                eligible_for_style=False,
+                rejection_reason=(
+                    f"与 {other.candidate_id} 在原图中重叠，判为滑窗重复"
+                ),
+            )
+        overlap_rejected += 1
+    return result, toc_rejected, overlap_rejected
 
 
 def _cluster_candidates(
@@ -421,8 +595,15 @@ def analyze_semantic_headings(
     lines, body_height = scan_independent_ink_lines(
         window_paths, windows, image_width, config
     )
+    image_height = max((item.end_y for item in windows), default=0)
+    toc = _detect_toc_region(
+        blocks, lines, body_height, image_width, image_height, config
+    )
     candidates = _initial_candidates(
         blocks, lines, body_height, image_width, config
+    )
+    candidates, toc_rejected_count, overlap_rejected_count = (
+        _exclude_toc_and_deduplicate(candidates, toc, config)
     )
     styles, assignment = _cluster_candidates(candidates, image_width, config)
     by_id = {item.candidate_id: item for item in candidates}
@@ -433,7 +614,7 @@ def analyze_semantic_headings(
         non_centered = [item for item in members if not item.centered]
         if not non_centered:
             continue
-        if style.median_height_ratio < config.semantic_min_heading_ratio:
+        if style.median_height_ratio < config.semantic_h2_min_style_ratio:
             continue
         has_model = any(item.strict_model_support for item in non_centered)
         has_strong_ink = any(
@@ -499,13 +680,42 @@ def analyze_semantic_headings(
     current_h2: str | None = None
     current_h3: str | None = None
     counters = {1: 0, 2: 0, 3: 0, 4: 0}
+    if toc is not None:
+        # 目录标题与正文主标题是特殊锚点：它们用于切开目录，但不加入 H2
+        # 样式投票，否则目录中的编号和字号会污染正文层级。
+        headings.extend(
+            [
+                Heading(
+                    id="semantic_toc_0000",
+                    level=1,
+                    role="semantic_toc",
+                    box=toc["toc_title_box"],
+                    parent_id=None,
+                    confidence=1.0,
+                    centered=True,
+                    member_ids=(toc["toc_title_block_id"],),
+                ),
+                Heading(
+                    id="semantic_h1_0000",
+                    level=1,
+                    role="semantic_h1",
+                    box=toc["document_h1_box"],
+                    parent_id=None,
+                    confidence=1.0,
+                    centered=True,
+                    member_ids=(toc["document_h1_block_id"],),
+                ),
+            ]
+        )
+        counters[1] = 1
     for item in candidates:
         style_id = assignment.get(item.candidate_id)
         level: int | None = None
         parent_id: str | None = None
         role = "style_candidate"
         if (
-            item.centered
+            toc is None
+            and item.centered
             and item.box.y1 < first_h2_y
             and item.height_ratio >= config.semantic_min_heading_ratio
         ):
@@ -570,24 +780,49 @@ def analyze_semantic_headings(
         )
 
     debug = {
-        "method": "strict-general6+independent-full-width-ink+style-clustering-v2",
+        "method": "strict-general6+guarded-independent-ink+toc-isolation-v3",
         "body_ink_line_height": body_height,
         "ink_line_count": len(lines),
         "strict_model_title_count": sum(item.source == "model" for item in candidates),
         "ink_only_candidate_count": sum(item.source == "ink" for item in candidates),
         "eligible_candidate_count": sum(item.eligible_for_style for item in candidates),
-        "h1_count": sum(item.level == 1 for item in headings),
+        "h1_count": sum(item.role == "semantic_h1" for item in headings),
+        "toc_count": sum(item.role == "semantic_toc" for item in headings),
         "h2_count": sum(item.level == 2 for item in headings),
         "h3_count": sum(item.level == 3 for item in headings),
         "h4_count": sum(item.level == 4 for item in headings),
         "selected_h2_style_ids": sorted(selected_style_ids),
         "fallback_required": not any(item.level == 2 for item in headings),
+        "toc_rejected_candidate_count": toc_rejected_count,
+        "overlap_rejected_candidate_count": overlap_rejected_count,
+        "oversized_ink_rejected_count": sum(
+            item.source == "ink"
+            and item.height_ratio > config.semantic_title_max_height_ratio
+            for item in candidates
+        ),
+        "toc_region": (
+            {
+                **{
+                    key: value
+                    for key, value in toc.items()
+                    if not isinstance(value, Box)
+                },
+                "toc_box": toc["toc_box"].to_dict(),
+                "toc_title_box": toc["toc_title_box"].to_dict(),
+                "document_h1_box": toc["document_h1_box"].to_dict(),
+            }
+            if toc is not None
+            else None
+        ),
         "parameters": {
             "title_confidence": config.title_confidence,
             "ink_threshold": config.semantic_ink_threshold,
             "full_width_active_ratio": config.semantic_full_width_active_ratio,
             "model_title_min_ratio": config.semantic_model_title_min_ratio,
             "ink_only_title_ratio": config.semantic_ink_only_title_ratio,
+            "title_max_height_ratio": config.semantic_title_max_height_ratio,
+            "h2_min_style_ratio": config.semantic_h2_min_style_ratio,
+            "candidate_overlap_ratio": config.semantic_candidate_overlap_ratio,
             "style_height_tolerance": config.semantic_style_height_tolerance,
             "style_indent_tolerance": config.semantic_style_indent_tolerance,
             "h2_cluster_height_tolerance": config.semantic_h2_cluster_height_tolerance,
@@ -622,6 +857,8 @@ def save_semantic_audit_windows(
     directories = {
         "ink": output_dir / "004_独立墨迹行窗口图",
         "model": output_dir / "005_严格模型标题窗口图",
+        "toc": output_dir / "006A_目录隔离窗口图",
+        "rejected": output_dir / "006B_候选拒绝原因窗口图",
         "final": output_dir / "007_最终标题层级窗口图",
     }
     for path in directories.values():
@@ -643,6 +880,30 @@ def save_semantic_audit_windows(
                     (item.box, "#ffaa00", f"{item.candidate_id} conf={item.model_confidence:.2f}")
                     for item in evidence
                     if item.source == "model"
+                ]
+            elif mode == "toc":
+                raw_toc = debug.get("toc_region")
+                items = [] if raw_toc is None else [
+                    (
+                        Box.from_dict(raw_toc["toc_box"]),
+                        "#cc00cc",
+                        "TOC：不参与正文标题投票",
+                    ),
+                    (
+                        Box.from_dict(raw_toc["document_h1_box"]),
+                        "#8a2be2",
+                        "正文 H1 起点",
+                    ),
+                ]
+            elif mode == "rejected":
+                items = [
+                    (
+                        item.box,
+                        "#cc00cc",
+                        f"拒绝 {item.candidate_id}：{item.rejection_reason}",
+                    )
+                    for item in evidence
+                    if not item.eligible_for_style and item.rejection_reason
                 ]
             else:
                 colors = {1: "#8a2be2", 2: "#e60000", 3: "#0066ff", 4: "#00aa55"}

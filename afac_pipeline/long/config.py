@@ -54,6 +54,16 @@ class LongConfig:
     semantic_model_title_min_ratio: float = 1.05
     semantic_ink_only_title_ratio: float = 1.35
     semantic_ink_only_min_whitespace_ratio: float = 0.60
+    # 单行标题即使字号很大，高度通常也不会超过正文的 2.6 倍。超过该值的
+    # 连通墨迹更可能是表格线、插图或多行内容粘成的大块，不能参与标题投票。
+    semantic_title_max_height_ratio: float = 2.60
+    # H3 可以只比正文略大，但 H2 是章节边界，要求应更严格。达不到该值时
+    # 宁可回退安全切块，也不把几十个普通小标题全部提升为 H2。
+    semantic_h2_min_style_ratio: float = 1.20
+    semantic_candidate_overlap_ratio: float = 0.65
+    semantic_toc_anchor_max_width_ratio: float = 0.82
+    semantic_toc_second_anchor_min_height_ratio: float = 2.00
+    semantic_toc_min_line_count: int = 8
     semantic_min_heading_ratio: float = 1.08
     semantic_style_height_tolerance: float = 0.10
     semantic_style_indent_tolerance: float = 0.06
@@ -63,7 +73,7 @@ class LongConfig:
     semantic_context_gap: int = 10
     semantic_audit_windows: bool = True
     minimum_part_height: int = 512
-    pipeline_version: str = "long-v6-independent-ink-style"
+    pipeline_version: str = "long-v7-guarded-ink-toc"
 
     def __post_init__(self) -> None:
         if self.strategy not in {"semantic", "legacy"}:
@@ -117,6 +127,10 @@ class LongConfig:
             raise ValueError("semantic_multiline_overlap_ratio 必须位于 0 到 1 之间")
         if not 0 < self.semantic_center_max_width_ratio <= 1:
             raise ValueError("semantic_center_max_width_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_toc_anchor_max_width_ratio <= 1:
+            raise ValueError("semantic_toc_anchor_max_width_ratio 必须位于 0 到 1 之间")
+        if not 0 < self.semantic_candidate_overlap_ratio <= 1:
+            raise ValueError("semantic_candidate_overlap_ratio 必须位于 0 到 1 之间")
         nonnegative = (
             self.semantic_multiline_gap_ratio,
             self.semantic_model_title_min_ratio,
@@ -126,6 +140,9 @@ class LongConfig:
             self.semantic_style_height_tolerance,
             self.semantic_style_indent_tolerance,
             self.semantic_h2_cluster_height_tolerance,
+            self.semantic_title_max_height_ratio,
+            self.semantic_h2_min_style_ratio,
+            self.semantic_toc_second_anchor_min_height_ratio,
         )
         if any(value < 0 for value in nonnegative):
             raise ValueError("语义墨迹和样式比例参数不能小于 0")
@@ -133,6 +150,8 @@ class LongConfig:
             raise ValueError("semantic_line_merge_gap 必须大于 0")
         if self.semantic_min_ink_line_height <= 0:
             raise ValueError("semantic_min_ink_line_height 必须大于 0")
+        if self.semantic_toc_min_line_count <= 0:
+            raise ValueError("semantic_toc_min_line_count 必须大于 0")
         if self.semantic_title_padding < 0 or self.semantic_context_gap < 0:
             raise ValueError("语义标题留白和上下文间隔不能小于 0")
         if not 0 <= self.vlm_overlap < self.adaptive_min_height:

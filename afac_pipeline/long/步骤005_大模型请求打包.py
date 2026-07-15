@@ -334,12 +334,52 @@ def build_semantic_recognition_packs(
                 overlap_bottom=bottom,
             )
 
-    # 文档头部、目录和 H1 不属于任何 H2，仍按空白安全切块完整保留。
-    if (
-        h2s[0].box.y1 > 0
-        and any(value > config.projection_blank_ratio for value in projection[: h2s[0].box.y1])
+    # 检测到双居中锚点时，把目录和正文 H1 前言明确分开。目录仍会完整送给
+    # VLM，只是不再参与 H2/H3 样式推断。没有目录锚点时维持原有头部切法。
+    toc_headings = sorted(
+        (item for item in headings if item.role == "semantic_toc"),
+        key=lambda item: item.box.y1,
+    )
+    document_h1s = sorted(
+        (item for item in headings if item.role == "semantic_h1"),
+        key=lambda item: item.box.y1,
+    )
+    first_h2_y = h2s[0].box.y1
+    separated_toc = (
+        toc_headings
+        and document_h1s
+        and toc_headings[0].box.y1 < document_h1s[0].box.y1 < first_h2_y
+    )
+    if separated_toc:
+        toc_heading = toc_headings[0]
+        document_h1 = document_h1s[0]
+        if any(
+            value > config.projection_blank_ratio
+            for value in projection[: toc_heading.box.y1]
+        ):
+            append_split_range(0, toc_heading.box.y1, "front_prefix", (), ())
+        append_split_range(
+            toc_heading.box.y1,
+            document_h1.box.y1,
+            "table_of_contents",
+            (),
+            (),
+        )
+        append_split_range(
+            document_h1.box.y1,
+            first_h2_y,
+            "front_matter",
+            (),
+            (),
+        )
+    elif (
+        first_h2_y > 0
+        and any(
+            value > config.projection_blank_ratio
+            for value in projection[:first_h2_y]
+        )
     ):
-        append_split_range(0, h2s[0].box.y1, "front_matter", (), ())
+        append_split_range(0, first_h2_y, "front_matter", (), ())
 
     section_debug: list[dict[str, Any]] = []
     for h2_index, h2 in enumerate(h2s):
@@ -463,6 +503,9 @@ def build_semantic_recognition_packs(
         "request_count": len(packs),
         "context_request_count": sum(bool(item.context_boxes) for item in packs),
         "fallback_overlap_count": sum(item.overlap_top > 0 for item in packs),
+        "toc_request_count": sum(
+            item.semantic_role.startswith("table_of_contents") for item in packs
+        ),
         "sections": section_debug,
     }
     return packs, debug
