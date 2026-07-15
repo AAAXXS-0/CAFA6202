@@ -28,7 +28,7 @@ class TableConfig:
     # 原图尺寸变化而漂移。
     table_analysis_scale: float = 0.20
     table_density_scale: float = 0.25
-    table_analysis_max_side: int = 4096
+    table_analysis_max_side: int = 4608
     max_vlm_side: int = 3900
     tile_overlap: int = 160
     single_tile_min_scale: float = 0.65
@@ -70,8 +70,8 @@ class TableConfig:
             raise ValueError("table_analysis_scale 必须位于 (0, 1] 内")
         if not 0 < self.table_density_scale <= 1:
             raise ValueError("table_density_scale 必须位于 (0, 1] 内")
-        if not 512 <= self.table_analysis_max_side <= 4096:
-            raise ValueError("table_analysis_max_side 应位于 512 到 4096 之间")
+        if not 512 <= self.table_analysis_max_side <= 8192:
+            raise ValueError("table_analysis_max_side 应位于 512 到 8192 之间")
         if not 512 <= self.max_vlm_side <= 4096:
             raise ValueError("max_vlm_side 应位于 512 到 4096 之间")
         if not 0 <= self.tile_overlap < self.max_vlm_side:

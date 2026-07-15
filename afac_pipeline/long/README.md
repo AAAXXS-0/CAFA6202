@@ -17,8 +17,13 @@ flowchart TD
     I -- "否" --> K["最低墨水位置 + 200px 重叠兜底"]
     J --> L["最高 3900px 的 VLM 请求图"]
     K --> L
-    L --> M["FinixDoc-VL 输出 Markdown"]
-    M --> N{"当前块是否真实重叠？"}
+    L --> M{"选择识别后端"}
+    M -- "官方模式" --> V["FinixDoc-VL 输出 Markdown"]
+    M -- "本地模式" --> S["约 2000px 重叠 OCR 小块"]
+    S --> T["RapidOCR 输出文字框"]
+    T --> U["按 Title/Text 坐标恢复标题与段落"]
+    V --> N{"当前块是否真实重叠？"}
+    U --> N
     N -- "是" --> O["接缝文本去重"]
     N -- "否" --> P["直接按阅读顺序拼接"]
     O --> Q["按已识别编号校正标题层级"]
@@ -26,7 +31,9 @@ flowchart TD
     Q --> R["长图分支 CSV"]
 ```
 
-小模型只负责提供“哪里可能有内容”的保守版面地图，不再依据连续 Title 推断 H1/H2/H3，也不再按照推测出的标题树切割原图。
+小模型始终只负责切割保护，绝不再按照标题树切割原图。官方 VLM 模式由
+VLM 自己判断标题；本地 OCR 没有视觉语义能力，因此仅在识别后复用 Title
+坐标和旧标题规则添加 Markdown 井号，不影响任何物理切块。
 
 ## 代码阅读顺序
 
@@ -37,6 +44,7 @@ flowchart TD
 步骤004_自适应安全切块.py       # 墨水投影、保护区间、空白带与重叠兜底
 步骤005_大模型请求打包.py       # 请求提示词和 Markdown 标题编号校正
 步骤006_全流程调度.py           # 准备目录、API 缓存、聚合与 CSV
+步骤007_本地OCR识别.py          # OCR 行排序、标题/段落恢复、缓存与 CSV
 ```
 
 旧版“连续 Title 推断标题层级”的实现已移动到：
@@ -135,7 +143,8 @@ work/long/
 
 ## 4. Markdown 标题和拼接
 
-程序不再用小模型的 Title 分布提前决定标题层级。FinixDoc-VL 先根据可见编号、字号和排版输出 Markdown，随后只对“已经是标题”的行校正井号：
+官方模式不使用小模型的 Title 分布提前决定标题层级。FinixDoc-VL 先根据
+可见编号、字号和排版输出 Markdown，随后只对“已经是标题”的行校正井号：
 
 ```text
 1 总则          → #
@@ -164,7 +173,21 @@ python main.py run-long \
 
 成功切块和完整图片结果都进入 SQLite。服务器繁忙或超时时，客户端会在 5 个白名单 userId 间轮换，并按第 n 次重试等待 `n × log₂(n)` 秒。
 
-## 6. 校验与调试
+## 6. 本地 OCR
+
+```bash
+PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-long \
+  --manifest work/long/dataset_manifest.json \
+  --work-dir work/local_ocr \
+  --output-csv outputs/long_local_ocr.csv
+```
+
+本地模式仍读取同一批 `vlm_requests` 原图块，但不会发出网络请求。大块先
+分成约 2000px 的 OCR 小块；OCR 行映射回原图后，复用 general6 的
+`Title/Text` 框和既有标题规则恢复 Markdown。只有实际存在重叠的请求块
+才做接缝去重。每个 OCR 小块和单图质量报告都会落盘，可断点续跑。
+
+## 7. 校验与调试
 
 ```bash
 python afac_pipeline/long/工具/工具001_检查准备结果.py \

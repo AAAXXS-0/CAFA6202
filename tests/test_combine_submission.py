@@ -35,6 +35,21 @@ class CombineSubmissionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "缺少"):
                 combine_submissions([partial], template, root / "final.csv")
 
+    def test_large_html_field_can_be_combined(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.csv"
+            branch = root / "table.csv"
+            large_html = "<table>" + "<td>1234567890</td>" * 10000 + "</table>"
+            write_submission({"table.jpg": ""}, template)
+            write_submission({"table.jpg": large_html}, branch)
+
+            output = combine_submissions([branch], template, root / "final.csv")
+            with output.open("r", encoding="utf-8", newline="") as file:
+                row = next(csv.DictReader(file))
+
+        self.assertEqual(row["ground_truth"], large_html)
+
 
 if __name__ == "__main__":
     unittest.main()

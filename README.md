@@ -1,6 +1,6 @@
 # AFAC 2026 文档解析工作流
 
-本仓库按赛题已经分好的数据目录，分别处理长图文档和图表图片；不做自动路由。两个分支共享精确去重、图像读取、缓存、FinixDoc-VL 客户端和提交文件生成，但检测、切块与 Markdown 聚合逻辑彼此独立。
+本仓库按赛题已经分好的数据目录，分别处理长图文档和图表图片；不做自动路由。两个分支共享精确去重、图像读取、缓存、本地 OCR/FinixDoc-VL 识别后端和提交文件生成，但检测、切块与后处理逻辑彼此独立。
 
 ## 项目结构
 
@@ -12,6 +12,7 @@ AFAC2026_challger/
 │   └── table/                  # 图表代码、配置、文档和分支工具
 ├── experiments/legacy_long/   # 早期随机切图和模型试验脚本，仅供追溯
 ├── tests/                     # 自动化测试
+├── requirements-local-ocr.txt # 可选 RapidOCR 离线识别依赖
 ├── main.py                    # 统一命令行入口
 ├── requirements.txt
 └── 赛题.txt
@@ -60,6 +61,48 @@ python main.py --help
 - `prepare-tables` / `run-tables`：准备、识别图表目录；
 - `prepare-long` / `run-long`：准备、识别长图目录；
 - `combine-submissions`：按官方模板顺序合并长图和图表 CSV。
+
+## 完全本地 OCR（不调用官方 API）
+
+第一版本地后端使用轻量中文 RapidOCR。安装到独立目录，不污染项目环境：
+
+```bash
+python3 -m pip install --target /tmp/afac_rapidocr -r requirements-local-ocr.txt
+```
+
+使用同一个 Python 一键识别两个分支，并按官方模板生成最终 CSV：
+
+```bash
+PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-all \
+  --long-manifest work/long/dataset_manifest.json \
+  --table-manifest work/tables/dataset_manifest.json \
+  --template finix_ab_A_submit_mock.csv \
+  --work-dir work/local_ocr \
+  --output-csv outputs/local_ocr_submission.csv
+```
+
+也可以只跑一个分支：
+
+```bash
+PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-long \
+  --manifest work/long/dataset_manifest.json \
+  --work-dir work/local_ocr \
+  --output-csv outputs/long_local_ocr.csv
+
+PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-tables \
+  --manifest work/tables/dataset_manifest.json \
+  --work-dir work/local_ocr \
+  --output-csv outputs/table_local_ocr.csv
+```
+
+本地 OCR 默认把请求图继续切成最长边约 2000px、带 160px 重叠的小块，
+所以不会为了识别一张 3900px 表格而把所有小字强行缩小。每个小块立即写入
+`work/local_ocr/cache`；中断后执行同一命令会从缓存继续。
+
+长图使用小模型 Title/Text 坐标恢复 Markdown 标题和正文段落。图表不会把
+OCR 视觉行直接猜成表格，而是把每个文字框投回 v6 已检测的逻辑单元格，
+删除整行/整列完全无字的冗余白带后确定性生成 HTML。公共层只约定文字框
+接口，以后可换 PaddleOCR GPU 或其他本地模型，不需要重写两个分支后处理。
 
 配置示例分别位于：
 

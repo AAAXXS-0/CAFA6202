@@ -24,8 +24,13 @@ flowchart TD
     K --> L["横向后续块重复左侧行名列"]
     L --> M["记录每块负责的逻辑行列坐标"]
     N["像素切片 + 自适应重叠兜底"]
-    Y --> O["FinixDoc-VL 输出 HTML table"]
-    M --> O
+    Y --> Z{"选择识别后端"}
+    M --> Z
+    Z -- "官方模式" --> O["FinixDoc-VL 输出 HTML table"]
+    Z -- "本地模式" --> LO["约 2000px 重叠 OCR 小块"]
+    LO --> LC["RapidOCR 输出文字框"]
+    LC --> LD["按原图坐标投回 v6 逻辑单元格"]
+    LD --> T
     N --> P["FinixDoc-VL 输出 Markdown 表格"]
     O --> Q["解析 HTML、校验行列数与 rowspan/colspan"]
     Q --> R["按逻辑坐标合并并删除重复上下文"]
@@ -53,6 +58,8 @@ v6 先把原图固定缩到 20%，再缩到该分析图的 25%，所以密度图
 1% 的白带。找横向白带时文字只左右扩张 0.15%，找纵向白带时上下扩张
 0.4%，不再删除靠近分析框外沿的候选。所有检测坐标最终映射回原图，实际
 请求图也始终从原图裁切。
+赛题最大图固定缩放后最长边为 4455px，因此分析图安全上限设为 4608px；
+这只限制内部分析图，不改变大模型或本地 OCR 请求图的 3900px 上限。
 
 ## 2. 准备图表
 
@@ -93,7 +100,25 @@ work/tables/
 
 若表格线和长空白带仍不足，程序使用最少数量的像素切片。160px 是目标重叠；当最少块容不下该重叠时会自动降低，而不会生成一张与前块几乎完全重复的尾图。所有请求图最长边不超过 3900px。
 
-## 4. 调用 FinixDoc-VL
+## 4. 本地 OCR 与网格回填
+
+```bash
+PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-tables \
+  --manifest work/tables/dataset_manifest.json \
+  --work-dir work/local_ocr \
+  --output-csv outputs/table_local_ocr.csv
+```
+
+本地模式不会把 OCR 的视觉文字行直接猜成表格。每个请求图先分成约 2000px
+的小块，避免把 3900px 表格压小；随后将所有 OCR 文字框从小块坐标映射到
+请求图坐标，再映射到原图坐标，最后用 v6 行列边界定位单元格。重复表头和
+行名列只作为识别上下文，不会被重复写入。
+
+白带检测可能保留仅用于安全切割的冗余边界。本地后处理会删除整行或整列
+完全没有任何 OCR 内容的边界，但保留真实单元格中的空值。最终结果以 HTML
+`table/tr/td` 输出，并在 `local_ocr_quality/` 保存回填率和行列统计。
+
+## 5. 调用 FinixDoc-VL
 
 ```bash
 python main.py run-tables \
@@ -108,7 +133,7 @@ python main.py run-tables \
 
 公共客户端位于 `afac_pipeline/common/vlm_client.py`，按官方 multipart 协议上传图片并解析双层 JSON。每个切片响应写入 `responses/` 并进入 SQLite 缓存，中断后重跑不会重复请求成功切片；HTTP 200 的“服务器繁忙”HTML 会被识别为临时错误而不是 Markdown。
 
-## 5. HTML 聚合、质量检查与失败策略
+## 6. HTML 聚合、质量检查与失败策略
 
 结构化路径要求 FinixDoc-VL 输出 HTML 表格。程序解析 `th/td` 以及 `rowspan/colspan`，删除重复表头和行名上下文，再按每块负责的逻辑坐标放回全局矩阵。单块表格的实际/预期行列数写入 `quality/region_*.json`；多块表格行列数不符、坐标冲突或合并单元格互相覆盖时会停止聚合，并保存 `merge_error.json` 和全部原始响应。
 
@@ -116,7 +141,7 @@ python main.py run-tables \
 
 当前 A 榜图表目录 50 张图片中有 49 个 SHA-256 唯一文件，可少解析 1 张完全重复图片。
 
-## 6. 校验
+## 7. 校验
 
 ```bash
 python afac_pipeline/table/tools/validate_prepared.py --manifest work/tables/dataset_manifest.json

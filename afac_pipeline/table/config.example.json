@@ -7,7 +7,7 @@
   "preview_max_side": 1800,
   "table_analysis_scale": 0.20,
   "table_density_scale": 0.25,
-  "table_analysis_max_side": 4096,
+  "table_analysis_max_side": 4608,
   "max_vlm_side": 3900,
   "tile_overlap": 160,
   "single_tile_min_scale": 0.65,

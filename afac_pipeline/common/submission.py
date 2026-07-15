@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import sys
 from typing import Iterable
 
 
@@ -39,6 +40,9 @@ def write_submission(
 def _read_submission(path: str | Path) -> tuple[list[str], dict[str, str]]:
     """读取两列提交 CSV，并在文件内部拒绝重复图片名。"""
 
+    # 超大表格的 HTML 可能超过 csv 模块默认 128KiB 单字段限制。赛题允许
+    # ground_truth 保存完整文档，因此读取合并时必须接受进程可寻址的字段。
+    csv.field_size_limit(sys.maxsize)
     source = Path(path)
     with source.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)

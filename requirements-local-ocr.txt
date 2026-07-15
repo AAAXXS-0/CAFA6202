@@ -1,0 +1,3 @@
+# 第一版本地离线识别后端。建议使用 --target 安装到独立目录，
+# 运行时通过 PYTHONPATH 指向该目录，避免改变正式预处理环境。
+rapidocr_onnxruntime==1.2.3
