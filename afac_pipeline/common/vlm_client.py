@@ -23,6 +23,7 @@ import requests
 OFFICIAL_PROTOCOL = "official_multipart"
 CHAT_PROTOCOL = "chat_completions"
 LOCAL_PADDLEOCR_PROTOCOL = "local_paddleocr_vl"
+LOCAL_FIRERED_PROTOCOL = "local_firered_ocr"
 RETRY_DELAY_BASE = 8
 MAX_RETRY_COUNT = 15
 
@@ -50,7 +51,11 @@ def select_request_prompt(
 ) -> str:
     """官方文件接口没有 prompt 字段；只有兼容接口才生成提示词。"""
 
-    if protocol in {OFFICIAL_PROTOCOL, LOCAL_PADDLEOCR_PROTOCOL}:
+    if protocol in {
+        OFFICIAL_PROTOCOL,
+        LOCAL_PADDLEOCR_PROTOCOL,
+        LOCAL_FIRERED_PROTOCOL,
+    }:
         return ""
     return prompt_factory()
 

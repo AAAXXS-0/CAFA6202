@@ -1,0 +1,14 @@
+# FireRed-OCR-2B 独立环境。先安装与显卡驱动匹配的 PyTorch CUDA 12.8：
+#   python -m pip install torch==2.7.1 torchvision==0.22.1 \
+#     --index-url https://download.pytorch.org/whl/cu128
+# 再安装本文件：
+#   python -m pip install -r requirements-firered.txt
+#
+# 不要安装进 AFAC_LOCAL_VL：Paddle 与 Torch 的 CUDA 运行库需要隔离。
+transformers>=4.57,<5
+accelerate>=1.10,<2
+qwen-vl-utils>=0.0.14,<1
+opencv-python-headless>=4.10,<5
+Pillow>=10,<13
+safetensors>=0.5,<1
+sentencepiece>=0.2,<1
