@@ -68,9 +68,7 @@ def 切换到本地环境() -> None:
     if wsl_cuda not in current_parts:
         current_parts.insert(0, wsl_cuda)
     environment["LD_LIBRARY_PATH"] = ":".join(current_parts)
-    # 8GB 显存采用按需增长，避免 Paddle 启动时一次性预占整张卡。
     environment["FLAGS_allocator_strategy"] = "auto_growth"
-    # 模型已经下载后跳过耗时的多源连通性探测；缺文件时仍会正常下载。
     environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
     os.execve(
         str(本地环境Python),
@@ -153,7 +151,6 @@ def main() -> int:
         table_manifest, table_config.digest(), 图表输入目录
     )
 
-    # 只检查环境时不启动 YOLO、不加载 0.9B 模型，也不创建任何识别缓存。
     if 环境开关("AFAC_LOCAL_VL_DRY_RUN"):
         print("[自检通过] Paddle 已识别到 CUDA GPU", flush=True)
         print(f"[长图清单] {'可复用' if long_ready else '需要重新预处理'}：{long_manifest}")
@@ -188,19 +185,29 @@ def main() -> int:
             ]
         )
 
-    # 3M 像素在这张 8GB 4060 上会 OOM；1M 已通过 3093×3600 真表测试。
-    max_pixels = int(os.environ.get("PADDLEOCR_MAX_PIXELS", "1000000"))
-    max_new_tokens = int(os.environ.get("PADDLEOCR_MAX_NEW_TOKENS", "4096"))
+    # 长图 30 万像素是当前 4060 的速度/质量甜点位；50 万以上在高长比
+    # 切块上进入非线性慢区间。图表文字更密，暂时保留较高上限。
+    max_pixels = int(os.environ.get("PADDLEOCR_MAX_PIXELS", "300000"))
+    max_new_tokens = int(os.environ.get("PADDLEOCR_MAX_NEW_TOKENS", "1024"))
+    table_max_pixels = int(
+        os.environ.get("PADDLEOCR_TABLE_MAX_PIXELS", "1000000")
+    )
+    table_max_new_tokens = int(
+        os.environ.get("PADDLEOCR_TABLE_MAX_NEW_TOKENS", "4096")
+    )
     print(
         "[本地模型] PaddleOCR-VL-1.6，GPU 单并行，"
-        f"max_pixels={max_pixels}，max_new_tokens={max_new_tokens}",
+        f"长图={max_pixels}px/{max_new_tokens}tok，"
+        f"图表={table_max_pixels}px/{table_max_new_tokens}tok",
         flush=True,
     )
     client = PaddleOCRVLClient(
         pipeline_version="v1.6",
         device="gpu:0",
         max_pixels=max_pixels,
+        table_max_pixels=table_max_pixels,
         max_new_tokens=max_new_tokens,
+        table_max_new_tokens=table_max_new_tokens,
     )
 
     long_work = 本地工作根目录 / f"长图_{long_config.digest()[:12]}"

@@ -64,15 +64,34 @@ python -m pip install -r requirements.txt
 AFAC_LOCAL_VL_DRY_RUN=1 /usr/bin/python3 一键生成本地模型CSV.py
 ```
 
-固定安全参数为 `max_pixels=1000000`、`max_new_tokens=4096`。3093×3600 的真实表格切块已在 RTX 4060 Laptop 8GB 上成功运行；300 万像素会超过显存，不建议提高。确需实验时可临时覆盖：
+### 长图本地模型策略
+
+RTX 4060 Laptop 8GB 的实测甜点位为 30 万像素、1024 token。50 万像素以上在高长比切块上会进入非线性慢区间，100 万像素可能数分钟没有结果。
+
+长图根据请求块高度自适应：
+
+- 高度不超过 2048px：保留 `PP-DocLayoutV3`，适合标题、目录和短正文，帮助模型及时结束；
+- 高度超过 2048px：关闭二次版面检测，使用整块 `ocr`。否则一个 H2 请求块可能再次拆成十几个内部 VLM 调用；
+- 内部 VLM worker 队列固定关闭，避免 WSL 下进程挂起；
+- 单块超过 30 秒时，每 30 秒打印一次累计耗时心跳。
+
+正式连续实测 24 个长图请求块，耗时稳定在约 2.3～14.8 秒。参数已写进缓存签名，旧的 100 万像素结果不会混入新流程。
+
+### 图表本地模型策略
+
+图表文字更密，暂时保留 100 万像素、4096 token 和版面检测。特大逻辑 tile 会生成带样式 HTML，单块仍可能很慢；后续应按更少逻辑行再次细分，而不是降低整个表格的识别清晰度。
+
+如需实验，可分别覆盖两类参数：
 
 ```bash
-PADDLEOCR_MAX_PIXELS=800000 \
-PADDLEOCR_MAX_NEW_TOKENS=3072 \
+PADDLEOCR_MAX_PIXELS=300000 \
+PADDLEOCR_MAX_NEW_TOKENS=1024 \
+PADDLEOCR_TABLE_MAX_PIXELS=1000000 \
+PADDLEOCR_TABLE_MAX_NEW_TOKENS=4096 \
 /usr/bin/python3 一键生成本地模型CSV.py
 ```
 
-像素和 token 参数已经写进缓存签名，调参后不会误用旧结果。内部 VLM worker 队列已关闭；外层锁保证 GPU 单并行，避免 WSL 下出现显存占满但 CPU 空转。运行位置：
+运行位置：
 
 ```text
 预处理：work/正式运行/
