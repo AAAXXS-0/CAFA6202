@@ -21,6 +21,11 @@ from .vlm_client import LOCAL_PADDLEOCR_PROTOCOL
 class PaddleOCRVLClient:
     """单卡常驻 PaddleOCR-VL；所有推理串行进入同一个模型实例。"""
 
+    # 空白判定故意很保守：缩略图中只要存在少量明显墨迹，就仍然交给模型。
+    # 版本单独写进调试记录，但不改 model 缓存签名，避免本次容错修复使已经
+    # 跑完的非空切块全部失去缓存。
+    BLANK_DETECTION_VERSION = "blank-v1"
+
     protocol = LOCAL_PADDLEOCR_PROTOCOL
 
     def __init__(
@@ -34,6 +39,12 @@ class PaddleOCRVLClient:
         table_max_new_tokens: int = 4096,
         long_layout_height: int = 2048,
         heartbeat_seconds: float = 30.0,
+        blank_preview_long_edge: int = 512,
+        blank_gray_threshold: int = 245,
+        blank_dark_threshold: int = 225,
+        blank_max_ink_ratio: float = 0.00001,
+        blank_max_dark_pixels: int = 0,
+        blank_uniform_span: int = 2,
         pipeline_factory: Callable[..., Any] | None = None,
     ) -> None:
         limits = (
@@ -46,6 +57,18 @@ class PaddleOCRVLClient:
         )
         if any(value <= 0 for value in limits):
             raise ValueError("像素、token、高度和心跳间隔必须大于 0")
+        if blank_preview_long_edge <= 0:
+            raise ValueError("空白检测缩略图长边必须大于 0")
+        if not 0 <= blank_dark_threshold <= blank_gray_threshold <= 255:
+            raise ValueError(
+                "空白检测灰度阈值必须满足 0 <= 深色阈值 <= 墨迹阈值 <= 255"
+            )
+        if not 0 <= blank_max_ink_ratio < 1:
+            raise ValueError("空白检测最大墨迹比例必须位于 [0, 1) 内")
+        if blank_max_dark_pixels < 0:
+            raise ValueError("空白检测最大深色像素数不能小于 0")
+        if not 0 <= blank_uniform_span <= 255:
+            raise ValueError("空白检测最大均匀灰度跨度必须位于 [0, 255] 内")
         if pipeline_factory is None:
             try:
                 from paddleocr import PaddleOCRVL
@@ -63,6 +86,12 @@ class PaddleOCRVLClient:
         self.table_max_new_tokens = table_max_new_tokens
         self.long_layout_height = long_layout_height
         self.heartbeat_seconds = heartbeat_seconds
+        self.blank_preview_long_edge = blank_preview_long_edge
+        self.blank_gray_threshold = blank_gray_threshold
+        self.blank_dark_threshold = blank_dark_threshold
+        self.blank_max_ink_ratio = blank_max_ink_ratio
+        self.blank_max_dark_pixels = blank_max_dark_pixels
+        self.blank_uniform_span = blank_uniform_span
         # ResultCache 会把 model 字符串纳入缓存键。路由方式和各分支上限都会
         # 改变识别结果，必须写进签名，不能误拿旧策略生成的缓存。
         self.model = (
@@ -88,10 +117,7 @@ class PaddleOCRVLClient:
         value = markdown.get("markdown_texts", "")
         if isinstance(value, list):
             value = "\n\n".join(str(item) for item in value)
-        text = str(value).strip()
-        if not text:
-            raise RuntimeError("PaddleOCR-VL 返回了空 Markdown")
-        return text
+        return str(value).strip()
 
     @staticmethod
     def _json_default(value: Any) -> Any:
@@ -104,6 +130,94 @@ class PaddleOCRVLClient:
         with Image.open(image_path) as image:
             return image.height
 
+    def _blank_metrics(self, image_path: Path) -> dict[str, Any]:
+        """在小缩略图上判断是否近乎纯白，并返回可核查的统计数据。
+
+        不按“白色占 99%”这类宽松条件判断，因为页边的一行小字也可能只占
+        很少像素。只有近白阈值以下的像素几乎为零，并且完全没有更深像素
+        时，才把切块视为空白。
+        """
+
+        with Image.open(image_path) as image:
+            # 透明图片先铺到白底，否则透明黑色会被误当成墨迹。
+            if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                rgba = image.convert("RGBA")
+                white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                gray = Image.alpha_composite(white, rgba).convert("L")
+            else:
+                gray = image.convert("L")
+            gray.thumbnail(
+                (self.blank_preview_long_edge, self.blank_preview_long_edge),
+                Image.Resampling.BOX,
+            )
+
+        histogram = gray.histogram()
+        pixel_count = gray.width * gray.height
+        ink_pixels = sum(histogram[: self.blank_gray_threshold])
+        dark_pixels = sum(histogram[: self.blank_dark_threshold])
+        # 至少容忍两个孤立噪点；大图再按极低比例增加容忍量。
+        allowed_ink_pixels = max(2, int(pixel_count * self.blank_max_ink_ratio))
+        gray_min, gray_max = gray.getextrema()
+        near_white_blank = (
+            ink_pixels <= allowed_ink_pixels
+            and dark_pixels <= self.blank_max_dark_pixels
+        )
+        # 有些预处理空块不是白色，而是整块同色的浅灰背景。颜色完全均匀
+        # 同样不可能承载文字；只容忍 2 级灰度浮动，避免吞掉浅色细字。
+        uniform_span = gray_max - gray_min
+        uniform_blank = uniform_span <= self.blank_uniform_span
+        is_blank = near_white_blank or uniform_blank
+        return {
+            "version": self.BLANK_DETECTION_VERSION,
+            "skipped_blank": is_blank,
+            "preview_width": gray.width,
+            "preview_height": gray.height,
+            "pixel_count": pixel_count,
+            "gray_threshold": self.blank_gray_threshold,
+            "dark_threshold": self.blank_dark_threshold,
+            "ink_pixels": ink_pixels,
+            "ink_ratio": ink_pixels / pixel_count if pixel_count else 0.0,
+            "allowed_ink_pixels": allowed_ink_pixels,
+            "dark_pixels": dark_pixels,
+            "allowed_dark_pixels": self.blank_max_dark_pixels,
+            "gray_min": gray_min,
+            "gray_max": gray_max,
+            "uniform_span": uniform_span,
+            "allowed_uniform_span": self.blank_uniform_span,
+            "near_white_blank": near_white_blank,
+            "uniform_blank": uniform_blank,
+        }
+
+    @staticmethod
+    def _debug_path(image_path: Path) -> Path:
+        output_dir = image_path.parent.parent / "local_vl_raw"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / f"{image_path.stem}.json"
+
+    def _save_blank_debug(
+        self,
+        image_path: Path,
+        elapsed_seconds: float,
+        runtime: dict[str, Any],
+        blank_metrics: dict[str, Any],
+    ) -> None:
+        """记录未进入模型的空白块，便于确认它为何被跳过。"""
+
+        payload = {
+            "res": {"parsing_res_list": []},
+            "local_runtime": {
+                "model": self.model,
+                "device": self.device,
+                "elapsed_seconds": round(elapsed_seconds, 4),
+                **runtime,
+            },
+            "blank_detection": blank_metrics,
+        }
+        self._debug_path(image_path).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _save_debug(
         self,
         image_path: Path,
@@ -113,16 +227,14 @@ class PaddleOCRVLClient:
     ) -> None:
         """把模型原始结构结果放回该图片的 prepared 目录，便于逐块检查。"""
 
-        output_dir = image_path.parent.parent / "local_vl_raw"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        payload = result.json
+        payload = dict(result.json)
         payload["local_runtime"] = {
             "model": self.model,
             "device": self.device,
             "elapsed_seconds": round(elapsed_seconds, 4),
             **runtime,
         }
-        (output_dir / f"{image_path.stem}.json").write_text(
+        self._debug_path(image_path).write_text(
             json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -195,6 +307,17 @@ class PaddleOCRVLClient:
         }
 
         start = time.perf_counter()
+        blank_metrics = self._blank_metrics(image_path)
+        if blank_metrics["skipped_blank"]:
+            elapsed = time.perf_counter() - start
+            self._save_blank_debug(image_path, elapsed, runtime, blank_metrics)
+            print(
+                f"[本地 VL/{branch}] {image_path.name}：检测为空白切块，"
+                "跳过模型并继续",
+                flush=True,
+            )
+            return ""
+
         stop_heartbeat = Event()
         heartbeat = Thread(
             target=self._heartbeat,
@@ -218,7 +341,17 @@ class PaddleOCRVLClient:
             )
         result = outputs[0]
         markdown = self._markdown_text(result)
-        self._save_debug(image_path, result, elapsed, runtime)
+        self._save_debug(
+            image_path,
+            result,
+            elapsed,
+            {**runtime, "blank_detection": blank_metrics},
+        )
+        if not markdown:
+            raise RuntimeError(
+                "PaddleOCR-VL 返回了空 Markdown，但图片中检测到了明显墨迹；"
+                "原始结果已保存，未把它当作正常空白吞掉"
+            )
         print(
             f"[本地 VL/{branch}] {image_path.name}：{elapsed:.2f}s，"
             f"Markdown {len(markdown)} 字符",
