@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -49,9 +50,14 @@ class FakeInputs(dict):
         return self
 
 
+class FakeImageProcessor:
+    max_pixels = 0
+
+
 class FakeProcessor:
     def __init__(self) -> None:
         self.messages = None
+        self.image_processor = FakeImageProcessor()
 
     def apply_chat_template(self, messages, **kwargs):
         self.messages = messages
@@ -66,12 +72,14 @@ class FakeProcessor:
 class FakeModel:
     def __init__(self) -> None:
         self.generate_calls = 0
+        self.max_new_tokens = []
 
     def eval(self):
         return self
 
     def generate(self, **kwargs):
         self.generate_calls += 1
+        self.max_new_tokens.append(kwargs["max_new_tokens"])
         return [[10, 11, 20, 21]]
 
 
@@ -90,22 +98,36 @@ class FireRedClientTest(unittest.TestCase):
             return model
 
         client = FireRedOCRClient(
+            max_pixels=300000,
+            table_max_pixels=654321,
+            max_new_tokens=1234,
+            table_max_new_tokens=4321,
             processor_loader=load_processor,
             model_loader=load_model,
             torch_module=FakeTorch(),
         )
         with tempfile.TemporaryDirectory() as directory:
-            image = Path(directory) / "prepared/sample/tiles/one.png"
-            image.parent.mkdir(parents=True)
-            Image.new("RGB", (100, 200), "white").save(image)
+            table_image = Path(directory) / "prepared/sample/tiles/one.png"
+            long_image = Path(directory) / "prepared/sample/vlm_requests/two.png"
+            table_image.parent.mkdir(parents=True)
+            long_image.parent.mkdir(parents=True)
+            for image_path in (table_image, long_image):
+                image = Image.new("RGB", (100, 200), "white")
+                image.paste("black", (0, 0, 12, 12))
+                image.save(image_path)
 
-            first = client.recognize(image, "这段外部提示词不应进入模型")
-            second = client.recognize(image)
+            first = client.recognize(
+                table_image,
+                "这段外部提示词不应进入模型",
+            )
+            second = client.recognize(long_image)
 
             self.assertEqual(first, "# 主标题\n\n正文")
             self.assertEqual(second, first)
             self.assertEqual(load_counts, {"processor": 1, "model": 1})
             self.assertEqual(model.generate_calls, 2)
+            self.assertEqual(model.max_new_tokens, [4321, 1234])
+            self.assertEqual(processor.image_processor.max_pixels, 300000)
             sent_prompt = processor.messages[0]["content"][1]["text"]
             self.assertEqual(sent_prompt, FIRERED_OFFICIAL_PROMPT)
 
@@ -132,6 +154,79 @@ class FireRedClientTest(unittest.TestCase):
             align_headings_to_manifest(markdown, pack),
             "## 任意一级文字\n\n### 任意二级文字\n\n正文",
         )
+
+    def test_blank_image_skips_the_only_model(self) -> None:
+        processor = FakeProcessor()
+        model = FakeModel()
+        client = FireRedOCRClient(
+            processor_loader=lambda *args, **kwargs: processor,
+            model_loader=lambda *args, **kwargs: model,
+            torch_module=FakeTorch(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = (
+                Path(directory)
+                / "prepared/sample/vlm_requests/blank.png"
+            )
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (600, 1200), "white").save(image_path)
+
+            markdown = client.recognize(image_path)
+
+            self.assertEqual(markdown, "")
+            self.assertEqual(model.generate_calls, 0)
+            debug_path = image_path.parent.parent / "firered_raw/blank.json"
+            self.assertIn('"skipped_blank": true', debug_path.read_text())
+
+    def test_extreme_toc_is_split_but_reuses_the_same_model(self) -> None:
+        processor = FakeProcessor()
+        model = FakeModel()
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = (
+                Path(directory)
+                / "prepared/sample/vlm_requests/toc.png"
+            )
+            image_path.parent.mkdir(parents=True)
+            image = Image.new("RGB", (600, 3900), "white")
+            for y in range(80, 3850, 40):
+                for x in range(30, 260):
+                    image.putpixel((x, y), (0, 0, 0))
+                for x in range(340, 570):
+                    image.putpixel((x, y), (0, 0, 0))
+            image.save(image_path)
+
+            client = FireRedOCRClient(
+                max_pixels=300000,
+                processor_loader=lambda *args, **kwargs: processor,
+                model_loader=lambda *args, **kwargs: model,
+                torch_module=FakeTorch(),
+            )
+            pack = SimpleNamespace(
+                context_boxes=(),
+                context_heading_ids=(),
+                visible_heading_ids=(),
+                source_box=None,
+                body_scale=1.0,
+                semantic_role="table_of_contents",
+                heading_hints=(),
+            )
+            markdown = client.recognize_long_pack(
+                image_path,
+                "",
+                pack,
+                {"config": {}, "semantic_headings": []},
+                10,
+            )
+
+            self.assertTrue(markdown)
+            self.assertGreaterEqual(model.generate_calls, 4)
+            plan_path = (
+                image_path.parent.parent
+                / "firered_parts/toc/plan.json"
+            )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual(plan["column_count"], 2)
+            self.assertTrue(plan["single_model_instance"])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,14 @@ from typing import Any, Callable
 
 from PIL import Image
 
+from .local_long_split import (
+    SPLIT_VERSION,
+    create_local_long_parts,
+    estimated_model_width,
+    leading_header_height,
+    merge_local_part_markdowns,
+    needs_local_long_split,
+)
 from .vlm_client import LOCAL_FIRERED_PROTOCOL
 
 
@@ -101,12 +110,23 @@ class FireRedOCRClient:
         device: str = "cuda:0",
         min_pixels: int = 256 * 28 * 28,
         max_pixels: int = 1024 * 28 * 28,
+        table_max_pixels: int = 2048 * 28 * 28,
         max_new_tokens: int = 4096,
+        table_max_new_tokens: int = 4096,
         processor_loader: Callable[..., Any] | None = None,
         model_loader: Callable[..., Any] | None = None,
         torch_module: Any | None = None,
     ) -> None:
-        if min_pixels <= 0 or max_pixels <= 0 or max_new_tokens <= 0:
+        if any(
+            value <= 0
+            for value in (
+                min_pixels,
+                max_pixels,
+                table_max_pixels,
+                max_new_tokens,
+                table_max_new_tokens,
+            )
+        ):
             raise ValueError("FireRed 像素和输出 token 上限必须大于 0")
         if min_pixels > max_pixels:
             raise ValueError("FireRed 最小像素数不能超过最大像素数")
@@ -142,10 +162,13 @@ class FireRedOCRClient:
         self.device = device
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.table_max_pixels = table_max_pixels
         self.max_new_tokens = max_new_tokens
+        self.table_max_new_tokens = table_max_new_tokens
         self.model = (
             f"{model_name}@torch-bf16-single;"
-            f"pixels={min_pixels}-{max_pixels};tokens={max_new_tokens}"
+            f"long={min_pixels}-{max_pixels}px-{max_new_tokens}tok;"
+            f"table={table_max_pixels}px-{table_max_new_tokens}tok"
         )
         self._lock = Lock()
 
@@ -153,7 +176,7 @@ class FireRedOCRClient:
         self._processor = processor_loader(
             model_name,
             min_pixels=min_pixels,
-            max_pixels=max_pixels,
+            max_pixels=max(max_pixels, table_max_pixels),
         )
         print("[FireRed] 加载唯一模型实例到 cuda:0", flush=True)
         self._model = model_loader(
@@ -190,6 +213,35 @@ class FireRedOCRClient:
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir / f"{image_path.stem}.json"
 
+    @staticmethod
+    def _blank_metrics(image_path: Path) -> dict[str, Any]:
+        """极保守地跳过纯白或完全均匀块，避免空块白白调用大模型。"""
+
+        with Image.open(image_path) as image:
+            gray = image.convert("L")
+            gray.thumbnail((512, 512), Image.Resampling.BOX)
+        histogram = gray.histogram()
+        pixel_count = gray.width * gray.height
+        ink_pixels = sum(histogram[:245])
+        dark_pixels = sum(histogram[:225])
+        allowed_ink = max(2, int(pixel_count * 0.00001))
+        gray_min, gray_max = gray.getextrema()
+        uniform_span = gray_max - gray_min
+        skipped = (
+            ink_pixels <= allowed_ink and dark_pixels == 0
+        ) or uniform_span <= 2
+        return {
+            "skipped_blank": skipped,
+            "preview_width": gray.width,
+            "preview_height": gray.height,
+            "ink_pixels": ink_pixels,
+            "dark_pixels": dark_pixels,
+            "allowed_ink_pixels": allowed_ink,
+            "gray_min": gray_min,
+            "gray_max": gray_max,
+            "uniform_span": uniform_span,
+        }
+
     def recognize(self, image_path: str | Path, prompt: str = "") -> str:
         """使用官方 FireRed 提示词识别一张图片；传入 prompt 故意不使用。"""
 
@@ -200,18 +252,47 @@ class FireRedOCRClient:
         with Image.open(image_path) as image:
             source_size = image.size
 
-        messages = self._messages(image_path)
-        inputs = self._processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(self.device)
+        blank_metrics = self._blank_metrics(image_path)
+        if blank_metrics["skipped_blank"]:
+            debug = {
+                "model": self.model,
+                "source_image": str(image_path),
+                "source_width": source_size[0],
+                "source_height": source_size[1],
+                "elapsed_seconds": 0.0,
+                "peak_gpu_memory_gib": round(self._allocated_gib(), 3),
+                "markdown_characters": 0,
+                "single_model_instance": True,
+                "blank_detection": blank_metrics,
+            }
+            self._debug_path(image_path).write_text(
+                json.dumps(debug, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[FireRed] {image_path.name}：空白块，跳过模型", flush=True)
+            return ""
 
+        is_table = "tiles" in image_path.parts
+        actual_max_pixels = (
+            self.table_max_pixels if is_table else self.max_pixels
+        )
+        actual_max_new_tokens = (
+            self.table_max_new_tokens if is_table else self.max_new_tokens
+        )
+        messages = self._messages(image_path)
         started = time.perf_counter()
         with self._lock:
             self._torch.cuda.reset_peak_memory_stats()
+            image_processor = getattr(self._processor, "image_processor", None)
+            if image_processor is not None:
+                image_processor.max_pixels = actual_max_pixels
+            inputs = self._processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(self.device)
             inference_context = getattr(
                 self._torch,
                 "inference_mode",
@@ -220,7 +301,7 @@ class FireRedOCRClient:
             with inference_context():
                 generated_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=self.max_new_tokens,
+                    max_new_tokens=actual_max_new_tokens,
                     do_sample=False,
                     use_cache=True,
                 )
@@ -247,7 +328,11 @@ class FireRedOCRClient:
             "elapsed_seconds": round(elapsed, 3),
             "peak_gpu_memory_gib": round(peak_gib, 3),
             "markdown_characters": len(markdown),
+            "branch": "table" if is_table else "long",
+            "max_pixels": actual_max_pixels,
+            "max_new_tokens": actual_max_new_tokens,
             "single_model_instance": True,
+            "blank_detection": blank_metrics,
         }
         self._debug_path(image_path).write_text(
             json.dumps(debug, ensure_ascii=False, indent=2),
@@ -265,3 +350,170 @@ class FireRedOCRClient:
         """让块内相对标题从 manifest 指定的 H1/H2/H3 起点开始。"""
 
         return align_headings_to_manifest(markdown, pack)
+
+    def long_pack_cache_model(self, image_path: str | Path) -> str:
+        """极端长图把临时切割版本写入外层 SQLite 缓存键。"""
+
+        image_path = Path(image_path)
+        with Image.open(image_path) as image:
+            width, height = image.size
+        if needs_local_long_split(
+            width,
+            height,
+            self.max_pixels,
+            trigger_height=2048,
+            minimum_estimated_width=512,
+        ):
+            return f"{self.model};{SPLIT_VERSION}-firered-v1"
+        return self.model
+
+    def recognize_long_pack(
+        self,
+        image_path: str | Path,
+        prompt: str,
+        pack: Any,
+        image_manifest: dict[str, Any],
+        context_gap: int,
+    ) -> str:
+        """只对会被缩得过窄的长图临时切割，所有子块仍由同一模型顺序识别。"""
+
+        image_path = Path(image_path)
+        with Image.open(image_path) as image:
+            width, height = image.size
+        if not needs_local_long_split(
+            width,
+            height,
+            self.max_pixels,
+            trigger_height=2048,
+            minimum_estimated_width=512,
+        ):
+            return self.recognize(image_path, prompt)
+
+        header_height, header_ids = leading_header_height(
+            pack,
+            image_manifest,
+            context_gap,
+            height,
+        )
+        split_root = image_path.parent.parent / "firered_parts" / image_path.stem
+        parts = create_local_long_parts(
+            image_path,
+            split_root,
+            header_height=header_height,
+            target_height=1500,
+            maximum_height=1800,
+            minimum_content_height=700,
+            search_radius=260,
+            fallback_overlap=128,
+            sample_width=512,
+            white_threshold=225,
+            blank_ratio=0.002,
+            minimum_blank_height=3,
+            split_columns=str(
+                getattr(pack, "semantic_role", "")
+            ).startswith("table_of_contents"),
+        )
+        if not parts:
+            return self.recognize(image_path, prompt)
+
+        split_version = f"{SPLIT_VERSION}-firered-v1"
+        estimated_width = estimated_model_width(
+            width,
+            height,
+            self.max_pixels,
+        )
+        plan = {
+            "version": split_version,
+            "source_image": str(image_path.resolve()),
+            "source_width": width,
+            "source_height": height,
+            "estimated_model_width_without_split": round(estimated_width, 2),
+            "header_height": header_height,
+            "header_heading_ids": list(header_ids),
+            "semantic_role": str(getattr(pack, "semantic_role", "unknown")),
+            "part_count": len(parts),
+            "column_count": max(item.column_count for item in parts),
+            "single_model_instance": True,
+            "parts": [item.to_dict() for item in parts],
+        }
+        plan_path = split_root / "plan.json"
+        plan_path.write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            f"[FireRed/长图临时切割] {image_path.name}："
+            f"{width}x{height}，预计模型宽度 {estimated_width:.0f}px，"
+            f"顺序识别 {len(parts)} 个子块",
+            flush=True,
+        )
+
+        responses_dir = split_root / "responses"
+        responses_dir.mkdir(parents=True, exist_ok=True)
+        markdowns: list[str] = []
+        for index, part in enumerate(parts, start=1):
+            part_path = split_root / "parts" / part.file_name
+            response_path = responses_dir / f"part_{part.index:03d}.md"
+            metadata_path = responses_dir / f"part_{part.index:03d}.json"
+            image_sha256 = hashlib.sha256(part_path.read_bytes()).hexdigest()
+            reusable = False
+            if response_path.is_file() and metadata_path.is_file():
+                try:
+                    metadata = json.loads(
+                        metadata_path.read_text(encoding="utf-8")
+                    )
+                    reusable = (
+                        metadata.get("image_sha256") == image_sha256
+                        and metadata.get("model") == self.model
+                        and metadata.get("split_version") == split_version
+                    )
+                except (OSError, json.JSONDecodeError):
+                    reusable = False
+
+            if reusable:
+                markdown = response_path.read_text(encoding="utf-8")
+                source = "缓存"
+            else:
+                print(
+                    f"[FireRed/长图子块 {index:02d}/{len(parts):02d}] "
+                    f"{part.file_name}",
+                    flush=True,
+                )
+                markdown = self.recognize(part_path, prompt)
+                response_path.write_text(markdown, encoding="utf-8")
+                metadata_path.write_text(
+                    json.dumps(
+                        {
+                            "image_sha256": image_sha256,
+                            "model": self.model,
+                            "split_version": split_version,
+                            "part": part.to_dict(),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                source = "模型"
+            markdowns.append(markdown)
+            print(
+                f"[FireRed/长图子块 {index:02d}/{len(parts):02d}] "
+                f"{source}完成，Markdown {len(markdown)} 字符",
+                flush=True,
+            )
+
+        repeated_heading_count = len(header_ids)
+        if header_height > 0 and repeated_heading_count == 0:
+            repeated_heading_count = 1
+        merged = merge_local_part_markdowns(
+            markdowns,
+            parts,
+            repeated_heading_count=repeated_heading_count,
+        )
+        (split_root / "merged.md").write_text(merged, encoding="utf-8")
+        plan["markdown_characters"] = len(merged)
+        plan_path.write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return merged

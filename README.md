@@ -16,6 +16,7 @@ AFAC2026_challger/
 ├── requirements-local-vl.txt  # PaddleOCR-VL 独立环境依赖
 ├── requirements-local-ocr.txt # 可选 RapidOCR 离线识别依赖
 ├── 一键生成本地模型CSV.py     # 推荐：4060 本地模型完整流程
+├── 一键生成FireRed模型CSV.py  # FireRed 单实例完整流程
 ├── 测试FireRed单模型.py        # FireRed 单实例顺序测试入口
 ├── 一键生成最终CSV.py         # 备用：赛事官方 API 完整流程
 ├── main.py                    # 统一命令行入口
@@ -38,12 +39,24 @@ python -m pip install -r requirements.txt
 
 超大图片建议安装系统 `libvips`，否则会自动使用 Pillow，功能不受影响但峰值内存更高。
 
-## 实验：4060 本地 FireRed-OCR-2B
+## 4060 本地 FireRed-OCR-2B
 
 FireRed 使用完全独立的 Torch 环境，不与 PaddleOCR-VL 同时实例化：
 
 ```text
 /home/zero/miniconda3/envs/AFAC_FIRERED
+```
+
+生成最终 100 行 CSV：
+
+```bash
+/usr/bin/python3 一键生成FireRed模型CSV.py
+```
+
+只检查 GPU、权重和预处理清单，不加载模型：
+
+```bash
+AFAC_FIRERED_DRY_RUN=1 /usr/bin/python3 一键生成FireRed模型CSV.py
 ```
 
 测试一张或多张已有切块时，模型只加载一次，图片严格顺序执行：
@@ -54,7 +67,9 @@ FireRed 使用完全独立的 Torch 环境，不与 PaddleOCR-VL 同时实例化
 
 输出保存在 `work/FireRed单模型测试/`，每张图片旁边还会生成包含耗时、峰值显存和模型签名的 `firered_raw/*.json`。测试入口固定使用 FireRed 官方 Markdown 转换提示词，不加载 Paddle、Nemotron 或第二份 FireRed。
 
-当前 4060 默认限制为约 80 万输入像素、4096 输出 token。需要重建环境时：
+正式流程固定 `max_workers=1`，长图约 80 万像素，图表约 160 万像素，两类输出上限均为 4096 token。实测正文块峰值显存 4.15 GiB；2199×707 宽表峰值 4.48 GiB、94.6 秒，完整输出 14×16 的 224 个单元格。
+
+需要重建环境时：
 
 ```bash
 /home/zero/miniconda3/bin/conda create -n AFAC_FIRERED python=3.11 pip -y
@@ -67,7 +82,13 @@ FireRed 使用完全独立的 Torch 环境，不与 PaddleOCR-VL 同时实例化
   -r requirements-firered.txt
 ```
 
-这条线路目前是独立实测入口；确认真实 Markdown 和显存后，再替换完整 CSV 的识别后端。
+运行位置：
+
+```text
+SQLite 缓存：work/FireRed正式运行/
+阶段 CSV：outputs/FireRed最终提交/长图结果.csv、图表结果.csv
+最终 CSV：outputs/FireRed最终提交/finix_ab_A_submit.csv
+```
 
 ## 推荐：4060 本地 PaddleOCR-VL
 

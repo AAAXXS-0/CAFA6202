@@ -69,7 +69,9 @@ def main() -> int:
     )
     client = FireRedOCRClient(
         max_pixels=options.最大像素,
+        table_max_pixels=options.最大像素,
         max_new_tokens=options.最大输出,
+        table_max_new_tokens=options.最大输出,
     )
     for index, image in enumerate(images, start=1):
         print(f"[测试 {index:02d}/{len(images):02d}] {image}", flush=True)
