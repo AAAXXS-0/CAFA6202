@@ -1,18 +1,21 @@
 # AFAC 2026 文档解析工作流
 
-本仓库按赛题已经分好的数据目录，分别处理长图文档和图表图片；不做自动路由。两个分支共享精确去重、图像读取、缓存、本地 OCR/FinixDoc-VL 识别后端和提交文件生成，但检测、切块与后处理逻辑彼此独立。
+本仓库按赛题已经分好的数据目录，分别处理长图文档和图表图片；不做自动路由。两个分支共享精确去重、图像读取、缓存、识别后端和提交文件生成，但检测、切块与后处理逻辑彼此独立。
 
 ## 项目结构
 
 ```text
 AFAC2026_challger/
 ├── afac_pipeline/
-│   ├── common/                 # SHA-256、图像后端、缓存、VLM 客户端、CSV
+│   ├── common/                 # SHA-256、图像后端、缓存、识别客户端、CSV
 │   ├── long/                   # 长图代码、配置示例和分支 README
 │   └── table/                  # 图表代码、配置、文档和分支工具
 ├── experiments/legacy_long/   # 早期随机切图和模型试验脚本，仅供追溯
 ├── tests/                     # 自动化测试
+├── requirements-local-vl.txt  # PaddleOCR-VL 独立环境依赖
 ├── requirements-local-ocr.txt # 可选 RapidOCR 离线识别依赖
+├── 一键生成本地模型CSV.py     # 推荐：4060 本地模型完整流程
+├── 一键生成最终CSV.py         # 备用：赛事官方 API 完整流程
 ├── main.py                    # 统一命令行入口
 ├── requirements.txt
 └── 赛题.txt
@@ -21,9 +24,9 @@ AFAC2026_challger/
 分支文档：
 
 - [长图分支](afac_pipeline/long/README.md)：严格 Title 0.60、独立全宽墨迹扫描、排版样式聚类、H2/H3 语义切块和祖先标题上下文；历史标题算法已归档，旧安全切割保留为 legacy。
-- [图表分支](afac_pipeline/table/README.md)：表格检测、缩放/二维切片、Markdown 表格拼接和失败处理。
+- [图表分支](afac_pipeline/table/README.md)：密度分表、黑白边界检测、逻辑网格切块、HTML/Markdown 表格拼接和失败处理。
 
-## 安装
+## 普通预处理环境
 
 建议使用 Python 3.10～3.12：
 
@@ -33,9 +36,73 @@ python -m pip install -r requirements.txt
 
 超大图片建议安装系统 `libvips`，否则会自动使用 Pillow，功能不受影响但峰值内存更高。
 
-## 最简单的完整运行方式
+## 推荐：4060 本地 PaddleOCR-VL
 
-无需填写任何路径或 API 参数，直接运行：
+当前机器已经配置好独立环境：
+
+```text
+/home/zero/miniconda3/envs/AFAC_LOCAL_VL
+```
+
+不需要手动 `conda activate`，也不要用这个环境运行 YOLO。直接在项目根目录执行：
+
+```bash
+/usr/bin/python3 一键生成本地模型CSV.py
+```
+
+脚本会自动完成以下工作：
+
+1. 用 `/usr/bin/python3` 复用或生成长图、图表预处理清单；
+2. 自动切换到 `AFAC_LOCAL_VL`；
+3. 用 GPU 0 单并行运行 `PaddleOCR-VL-1.6`；
+4. 每个成功切块立即写入独立 SQLite 缓存；
+5. 分别聚合长图和图表结果，按模板生成严格 100 行的最终 CSV。
+
+只检查 GPU、环境、模型缓存和预处理清单，不开始识别：
+
+```bash
+AFAC_LOCAL_VL_DRY_RUN=1 /usr/bin/python3 一键生成本地模型CSV.py
+```
+
+固定安全参数为 `max_pixels=1000000`、`max_new_tokens=4096`。3093×3600 的真实表格切块已在 RTX 4060 Laptop 8GB 上成功运行；300 万像素会超过显存，不建议提高。确需实验时可临时覆盖：
+
+```bash
+PADDLEOCR_MAX_PIXELS=800000 \
+PADDLEOCR_MAX_NEW_TOKENS=3072 \
+/usr/bin/python3 一键生成本地模型CSV.py
+```
+
+像素和 token 参数已经写进缓存签名，调参后不会误用旧结果。内部 VLM worker 队列已关闭；外层锁保证 GPU 单并行，避免 WSL 下出现显存占满但 CPU 空转。运行位置：
+
+```text
+预处理：work/正式运行/
+本地缓存：work/本地模型正式运行/
+模型原始 JSON：对应 prepared 图片目录/local_vl_raw/
+阶段 CSV：outputs/本地模型最终提交/长图结果.csv
+阶段 CSV：outputs/本地模型最终提交/图表结果.csv
+最终 CSV：outputs/本地模型最终提交/finix_ab_A_submit.csv
+```
+
+手动中断后重新运行同一命令即可续跑。程序会跳过相同模型签名下已经成功的切块。
+
+如以后需要重建独立环境：
+
+```bash
+/home/zero/miniconda3/bin/conda create -n AFAC_LOCAL_VL python=3.10 -y
+
+/home/zero/miniconda3/envs/AFAC_LOCAL_VL/bin/python -m pip install \
+  paddlepaddle-gpu==3.2.1 \
+  -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+/home/zero/miniconda3/envs/AFAC_LOCAL_VL/bin/python -m pip install \
+  -r requirements-local-vl.txt
+```
+
+不要在该环境安装 CUDA 12.8/13.0 的 Torch，它会替换 Paddle 3.2.1 使用的 CUDA 12.6 运行库。长图 YOLO 仍由普通预处理环境负责。
+
+## 备用：官方 API 一键流程
+
+官方接口可用时执行：
 
 ```bash
 /usr/bin/python3 一键生成最终CSV.py
@@ -47,7 +114,7 @@ python -m pip install -r requirements.txt
 ./一键生成最终CSV.sh
 ```
 
-脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。默认同时识别 6 张唯一图片，可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。启动时会打印长图和图表各自的 SQLite 缓存位置；每个成功切片立即落盘，API 繁忙或手动中断后重新运行会跳过已成功切片。
+脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。默认同时识别 6 张唯一图片，可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。
 
 ## 统一命令行
 
@@ -62,11 +129,11 @@ python main.py --help
 - `prepare-long` / `run-long`：准备、识别长图目录；
 - `combine-submissions`：按官方模板顺序合并长图和图表 CSV。
 
-`run-long` 和 `run-tables` 可传 `--workers 6` 并行识别唯一图片；默认命令行值仍为 1，避免手工调试时意外并发。
+`run-long` 和 `run-tables` 可传 `--workers 6` 并行识别唯一图片；本地 8GB GPU 客户端固定使用 1，避免多个任务同时挤爆显存。
 
-## 完全本地 OCR（不调用官方 API）
+## 轻量本地 OCR 备用线
 
-第一版本地后端使用轻量中文 RapidOCR。安装到独立目录，不污染项目环境：
+RapidOCR 是早期离线保底方案，质量低于 PaddleOCR-VL，但代码继续保留。安装到独立目录，不污染项目环境：
 
 ```bash
 python3 -m pip install --target /tmp/afac_rapidocr -r requirements-local-ocr.txt
@@ -83,28 +150,7 @@ PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-all \
   --output-csv outputs/local_ocr_submission.csv
 ```
 
-也可以只跑一个分支：
-
-```bash
-PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-long \
-  --manifest work/long/dataset_manifest.json \
-  --work-dir work/local_ocr \
-  --output-csv outputs/long_local_ocr.csv
-
-PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-tables \
-  --manifest work/tables/dataset_manifest.json \
-  --work-dir work/local_ocr \
-  --output-csv outputs/table_local_ocr.csv
-```
-
-本地 OCR 默认把请求图继续切成最长边约 2000px、带 160px 重叠的小块，
-所以不会为了识别一张 3900px 表格而把所有小字强行缩小。每个小块立即写入
-`work/local_ocr/cache`；中断后执行同一命令会从缓存继续。
-
-长图使用小模型 Title/Text 坐标恢复 Markdown 标题和正文段落。图表不会把
-OCR 视觉行直接猜成表格，而是把每个文字框投回 v6 已检测的逻辑单元格，
-删除整行/整列完全无字的冗余白带后确定性生成 HTML。公共层只约定文字框
-接口，以后可换 PaddleOCR GPU 或其他本地模型，不需要重写两个分支后处理。
+本地 OCR 默认把请求图继续切成最长边约 2000px、带 160px 重叠的小块。长图使用小模型 Title/Text 坐标恢复标题和正文；图表把文字框投回 v6 已检测的逻辑单元格，确定性生成 HTML。
 
 配置示例分别位于：
 
@@ -117,20 +163,9 @@ SHA-256 根据文件的全部字节生成摘要。摘要相同可以视为文件
 
 当前 A 榜数据实测：图表 50 张中 49 张唯一图；长图 50 张中 33 张唯一图，后者可直接复用 17 张的完整结果。
 
-## 官方 API 与最终提交
+## 官方 API 细节与最终提交
 
-官方 `FinixDoc_VL调用.txt` 使用 multipart 表单上传，客户端会解析外层业务 JSON、内层模型 JSON 和 Markdown 代码围栏：
-
-```bash
-python main.py run-long \
-  --manifest work/long/dataset_manifest.json \
-  --work-dir work/long \
-  --credentials-file FinixDoc_VL调用.txt \
-  --user-id finixB2002 \
-  --output-csv outputs/long_submission.csv
-```
-
-如果官方网关以 HTTP 200 返回“服务器繁忙”HTML，程序会识别为临时错误并按配置重试，而不会把 HTML 当作 Markdown。官方说明中的 5 个白名单 userId 会在重试时循环切换；并行任务的首次请求也会轮换账号，避免全部挤到同一用户名。第 n 次重试前等待 `(8+n-1)²` 秒，即 `64、81、100……484` 秒；最多重试 15 次，超过后停止。一键脚本可用环境变量 `FINIXDOC_MAX_RETRIES` 把次数调低，但不能超过 15。每个成功切片即时进入当前分支工作目录的 SQLite 缓存。
+官方 `FinixDoc_VL调用.txt` 使用 multipart 表单上传。客户端会解析外层业务 JSON、内层模型 JSON 和 Markdown 代码围栏。官方网关临时繁忙时会轮换说明文件中的白名单账号，并按 `64、81、100……484` 秒退让，最多重试 15 次。官方请求严格按说明文件只上传图片，不附加自定义提示词。
 
 长图和图表各自生成 50 行 CSV 后，按 100 行官方模板严格合并：
 
@@ -151,4 +186,4 @@ python -m compileall -q afac_pipeline main.py tests
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖精确哈希、图表检测和聚合、长图检测滑窗、H2/H3 语义切块、祖先标题去重、自适应安全切割、缓存和 CSV 输出。
+测试覆盖精确哈希、图表检测和聚合、长图检测滑窗、H2/H3 语义切块、祖先标题去重、自适应安全切割、缓存、本地模型客户端和 CSV 输出。

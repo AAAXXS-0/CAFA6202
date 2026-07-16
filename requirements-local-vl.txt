@@ -1,0 +1,15 @@
+# PaddleOCR-VL-1.6 独立 GPU 环境（当前机器已安装完成）。
+#
+# 先从 Paddle 官方 CUDA 12.6 源安装核心：
+#   python -m pip install paddlepaddle-gpu==3.2.1 \
+#     -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+#
+# 再安装本文件：
+#   python -m pip install -r requirements-local-vl.txt
+#
+# 不要在这个环境中额外安装 CUDA 12.8/13.0 的 Torch；它会替换 Paddle
+# 依赖的 CUDA 运行库。长图 YOLO 预处理仍由项目原来的 /usr/bin/python3 执行。
+paddleocr[doc-parser]==3.7.0
+paddlex==3.7.2
+# Paddle 原生 VL 解码也需要 tokenizers；它并非只属于 Transformers 后端。
+tokenizers==0.23.1
