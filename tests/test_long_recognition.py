@@ -41,7 +41,58 @@ class FakeClient:
         return "### 1 总则\n\n正文内容"
 
 
+class PackAwareClient:
+    model = "fake-pack-aware-local-vl"
+
+    def __init__(self) -> None:
+        self.pack_calls = 0
+
+    def recognize(self, image_path: Path, prompt: str) -> str:
+        raise AssertionError("长图本地客户端应收到完整请求包元数据")
+
+    def recognize_long_pack(
+        self,
+        image_path: Path,
+        prompt: str,
+        pack,
+        image_manifest,
+        context_gap: int,
+    ) -> str:
+        self.pack_calls += 1
+        if not image_path.is_file() or pack.file_name != image_path.name:
+            raise AssertionError("请求包和请求图片不一致")
+        if "semantic_headings" not in image_manifest or context_gap < 0:
+            raise AssertionError("没有传入标题框或上下文间隔")
+        return "## 本地分块标题\n\n正文"
+
+
 class LongRecognitionTest(unittest.TestCase):
+    def test_pack_aware_local_client_receives_manifest_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "images"
+            input_dir.mkdir()
+            Image.new("RGB", (600, 2500), "white").save(
+                input_dir / "long.jpg",
+                format="PNG",
+            )
+            pipeline = LongPipeline(
+                LongConfig(backend="pillow"),
+                root / "work",
+                detector=OneHeadingDetector(),
+            )
+            manifest = pipeline.prepare_directory(input_dir)
+            client = PackAwareClient()
+
+            results = pipeline.recognize_dataset(
+                manifest,
+                client,
+                root / "submission.csv",
+            )
+
+            self.assertEqual(client.pack_calls, 1)
+            self.assertIn("本地分块标题", results["long.jpg"])
+
     def test_long_result_cache_and_csv(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

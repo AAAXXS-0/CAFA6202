@@ -323,7 +323,17 @@ class LongPipeline:
                     f"{pack.file_name}：请求 API",
                     flush=True,
                 )
-                markdown = client.recognize(crop_path, prompt)
+                recognize_long_pack = getattr(client, "recognize_long_pack", None)
+                if callable(recognize_long_pack):
+                    markdown = recognize_long_pack(
+                        crop_path,
+                        prompt,
+                        pack,
+                        image_manifest,
+                        self.config.semantic_context_gap,
+                    )
+                else:
+                    markdown = client.recognize(crop_path, prompt)
                 self.cache.put_tile(
                     cache_key,
                     markdown,

@@ -1,10 +1,14 @@
 from pathlib import Path
+import json
 import tempfile
+import time
 import unittest
 
 from PIL import Image
 
 from afac_pipeline.common.local_vl_client import PaddleOCRVLClient
+from afac_pipeline.common.models import Box
+from afac_pipeline.long.步骤005_大模型请求打包 import RecognitionPack
 
 
 class FakeResult:
@@ -19,6 +23,13 @@ class FakePipeline:
 
     def predict(self, image_path: str, **kwargs):
         self.predict_calls.append((image_path, kwargs))
+        return [FakeResult()]
+
+
+class SlowPipeline(FakePipeline):
+    def predict(self, image_path: str, **kwargs):
+        self.predict_calls.append((image_path, kwargs))
+        time.sleep(5)
         return [FakeResult()]
 
 
@@ -86,6 +97,79 @@ class LocalVLClientTest(unittest.TestCase):
                     "prompt_label": "ocr",
                 },
             )
+
+    def test_extreme_toc_is_split_and_each_part_reuses_toc_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "prepared/sample/vlm_requests/toc.png"
+            image.parent.mkdir(parents=True)
+            canvas = Image.new("RGB", (600, 3900), "white")
+            for x in range(180, 420):
+                for y in range(15, 55):
+                    canvas.putpixel((x, y), (0, 0, 0))
+            for y in range(100, 3850, 35):
+                for x in range(40, 560):
+                    for offset in range(8):
+                        canvas.putpixel((x, y + offset), (0, 0, 0))
+            canvas.save(image)
+
+            pack = RecognitionPack(
+                "request_00001",
+                Box(0, 100, 600, 4000),
+                ("table_of_contents",),
+                (),
+                (),
+                image.name,
+                visible_heading_ids=("toc",),
+                semantic_role="table_of_contents",
+            )
+            manifest = {
+                "config": {"semantic_title_padding": 10},
+                "semantic_headings": [
+                    {
+                        "id": "toc",
+                        "box": {
+                            "x1": 0,
+                            "y1": 100,
+                            "x2": 600,
+                            "y2": 160,
+                        },
+                    }
+                ],
+            }
+            client = PaddleOCRVLClient(pipeline_factory=FakePipeline)
+
+            markdown = client.recognize_long_pack(
+                image,
+                "",
+                pack,
+                manifest,
+                10,
+            )
+
+            self.assertGreaterEqual(len(client._pipeline.predict_calls), 3)
+            self.assertEqual(markdown.count("## 本地标题"), 1)
+            split_root = image.parent.parent / "local_vl_parts/toc"
+            plan = json.loads((split_root / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["header_heading_ids"], ["toc"])
+            self.assertGreater(plan["header_height"], 0)
+            first_call_count = len(client._pipeline.predict_calls)
+
+            cached = client.recognize_long_pack(image, "", pack, manifest, 10)
+            self.assertEqual(cached, markdown)
+            self.assertEqual(len(client._pipeline.predict_calls), first_call_count)
+
+    def test_single_prediction_has_hard_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "prepared/sample/vlm_requests/slow.png"
+            self._image(image, 100, 100)
+            client = PaddleOCRVLClient(
+                inference_timeout_seconds=0.05,
+                pipeline_factory=SlowPipeline,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "超过 0.05s"):
+                client.recognize(image)
 
     def test_table_uses_independent_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
