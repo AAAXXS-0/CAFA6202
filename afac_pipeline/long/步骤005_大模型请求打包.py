@@ -632,13 +632,13 @@ def _numbered_heading_level(text: str) -> int | None:
         number = arabic.group(1)
         if "." not in number and int(number) > 99:
             return None
-        return min(3, number.count(".") + 1)
+        return min(5, number.count(".") + 2)
     if re.match(r"^[一二三四五六七八九十百]+[、．.]", value):
-        return 1
-    if re.match(r"^[（(][一二三四五六七八九十百]+[）)]", value):
         return 2
+    if re.match(r"^[（(][一二三四五六七八九十百]+[）)]", value):
+        return 4
     if re.match(r"^[（(]?\d+[）)]", value):
-        return 3
+        return 4
     return None
 
 

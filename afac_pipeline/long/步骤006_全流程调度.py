@@ -49,7 +49,7 @@ from ..common.vlm_client import (
 )
 
 
-LONG_PROMPT_VERSION = "long-markdown-v5-independent-ink-style"
+LONG_PROMPT_VERSION = "long-markdown-v6-local-heading-structure"
 
 
 def _dump_json(path: Path, value: Any) -> None:
@@ -313,7 +313,11 @@ class LongPipeline:
                 lambda: build_pack_prompt(pack),
             )
             image_bytes = crop_path.read_bytes()
-            cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
+            cache_model = client.model
+            long_pack_cache_model = getattr(client, "long_pack_cache_model", None)
+            if callable(long_pack_cache_model):
+                cache_model = long_pack_cache_model(crop_path)
+            cache_key = self.cache.tile_key(image_bytes, prompt, cache_model)
             markdown = self.cache.get_tile(cache_key)
             source = "缓存"
             if markdown is None:
@@ -339,10 +343,13 @@ class LongPipeline:
                     markdown,
                     {
                         "pack": pack.to_dict(),
-                        "model": client.model,
+                        "model": cache_model,
                         "prompt_version": LONG_PROMPT_VERSION,
                     },
                 )
+            postprocess_long_pack = getattr(client, "postprocess_long_pack", None)
+            if callable(postprocess_long_pack):
+                markdown = postprocess_long_pack(markdown, pack)
             (response_dir / f"{pack.id}.md").write_text(markdown, encoding="utf-8")
             cleaned = strip_repeated_context_headings(
                 markdown,

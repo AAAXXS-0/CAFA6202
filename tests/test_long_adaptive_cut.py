@@ -82,9 +82,9 @@ class LongAdaptiveCutTest(unittest.TestCase):
         )
         self.assertEqual(
             normalize_markdown_heading_levels(markdown),
-            "# 1 总则\n"
-            "## 1.1 投保条件\n"
-            "### 1.1.1 责任范围\n"
+            "## 1 总则\n"
+            "### 1.1 投保条件\n"
+            "#### 1.1.1 责任范围\n"
             "普通正文 2.1 不应成为标题",
         )
 

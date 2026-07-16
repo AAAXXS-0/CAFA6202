@@ -110,7 +110,7 @@ class LongRecognitionTest(unittest.TestCase):
             output_csv = root / "long_submission.csv"
             first = FakeClient()
             results = pipeline.recognize_dataset(manifest, first, output_csv)
-            self.assertEqual(results["long.jpg"], "# 1 总则\n\n正文内容")
+            self.assertEqual(results["long.jpg"], "## 1 总则\n\n正文内容")
             self.assertEqual(first.calls, 1)
 
             second = FakeClient()

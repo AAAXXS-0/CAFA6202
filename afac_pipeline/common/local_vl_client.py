@@ -26,6 +26,7 @@ from .local_long_split import (
     leading_header_height,
     merge_local_part_markdowns,
     needs_local_long_split,
+    restore_local_markdown_headings,
 )
 from .vlm_client import LOCAL_PADDLEOCR_PROTOCOL
 
@@ -57,7 +58,7 @@ class PaddleOCRVLClient:
         blank_max_ink_ratio: float = 0.00001,
         blank_max_dark_pixels: int = 0,
         blank_uniform_span: int = 2,
-        long_split_trigger_height: int = 3000,
+        long_split_trigger_height: int = 2048,
         long_split_minimum_model_width: int = 512,
         long_subblock_target_height: int = 1500,
         long_subblock_max_height: int = 1800,
@@ -446,6 +447,28 @@ class PaddleOCRVLClient:
         )
         return markdown
 
+    def long_pack_cache_model(self, image_path: str | Path) -> str:
+        """只有会临时切割的请求把切割版本加入 tile 缓存键。"""
+
+        image_path = Path(image_path)
+        with Image.open(image_path) as image:
+            width, height = image.size
+        if needs_local_long_split(
+            width,
+            height,
+            self.max_pixels,
+            trigger_height=self.long_split_trigger_height,
+            minimum_estimated_width=self.long_split_minimum_model_width,
+        ):
+            return f"{self.model};{SPLIT_VERSION}"
+        return self.model
+
+    @staticmethod
+    def postprocess_long_pack(markdown: str, pack: Any) -> str:
+        """缓存命中和新识别统一恢复 H1～H5；目录项本身不升级。"""
+
+        return restore_local_markdown_headings(markdown, pack)
+
     def recognize_long_pack(
         self,
         image_path: str | Path,
@@ -492,6 +515,9 @@ class PaddleOCRVLClient:
             white_threshold=self.long_subblock_white_threshold,
             blank_ratio=self.long_subblock_blank_ratio,
             minimum_blank_height=self.long_subblock_minimum_blank_height,
+            split_columns=str(getattr(pack, "semantic_role", "")).startswith(
+                "table_of_contents"
+            ),
         )
         if not parts:
             return self.recognize(image_path, prompt)
@@ -507,6 +533,7 @@ class PaddleOCRVLClient:
             "header_heading_ids": list(header_ids),
             "semantic_role": str(getattr(pack, "semantic_role", "unknown")),
             "part_count": len(parts),
+            "column_count": max(item.column_count for item in parts),
             "parts": [item.to_dict() for item in parts],
         }
         plan_path = split_root / "plan.json"

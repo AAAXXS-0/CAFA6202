@@ -18,13 +18,15 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
-SPLIT_VERSION = "local-long-split-v1"
+SPLIT_VERSION = "local-long-split-v2-columns-headings"
 
 
 @dataclass(frozen=True)
 class LocalLongPart:
     index: int
     file_name: str
+    content_start_x: int
+    content_end_x: int
     content_start_y: int
     content_end_y: int
     overlap_top: int
@@ -32,6 +34,8 @@ class LocalLongPart:
     cut_method: str
     header_height: int
     output_height: int
+    column_index: int = 0
+    column_count: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -170,6 +174,160 @@ def _choose_boundary(
     return boundary, method
 
 
+def _detect_column_ranges(
+    image: Image.Image,
+    header_height: int,
+    *,
+    white_threshold: int,
+    blank_ratio: float,
+) -> list[tuple[int, int]]:
+    """在正文中央查找贯穿大部分高度的竖向空白槽。"""
+
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    body = gray[header_height:] if header_height < gray.shape[0] else gray
+    projection = np.mean(body < white_threshold, axis=0)
+    width = image.width
+    search_start = round(width * 0.28)
+    search_end = round(width * 0.72)
+    minimum_width = max(12, round(width * 0.02))
+    candidates: list[tuple[int, float, int, int]] = []
+    cursor = search_start
+    while cursor < search_end:
+        if projection[cursor] > blank_ratio:
+            cursor += 1
+            continue
+        band_start = cursor
+        while cursor < search_end and projection[cursor] <= blank_ratio:
+            cursor += 1
+        band_end = cursor
+        if band_end - band_start >= minimum_width:
+            middle = (band_start + band_end) // 2
+            candidates.append(
+                (
+                    abs(middle - width // 2),
+                    float(projection[band_start:band_end].mean()),
+                    band_start,
+                    band_end,
+                )
+            )
+
+    if not candidates:
+        return [(0, width)]
+    _, _, band_start, band_end = min(candidates)
+    boundary = (band_start + band_end) // 2
+    return [(0, boundary), (boundary, width)]
+
+
+def _fit_header_to_width(header: Image.Image, width: int) -> Image.Image:
+    """保留标题真实字形，去掉两侧大空白后居中放进列宽。"""
+
+    gray = np.asarray(header.convert("L"), dtype=np.uint8)
+    active = np.argwhere(gray < 245)
+    if active.size:
+        x1 = max(0, int(active[:, 1].min()) - 12)
+        x2 = min(header.width, int(active[:, 1].max()) + 13)
+        visible = header.crop((x1, 0, x2, header.height))
+    else:
+        visible = header.copy()
+    if visible.width > width:
+        scale = width / visible.width
+        visible = visible.resize(
+            (width, max(1, round(visible.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    canvas = Image.new("RGB", (width, header.height), "white")
+    canvas.paste(
+        visible,
+        ((width - visible.width) // 2, max(0, (header.height - visible.height) // 2)),
+    )
+    return canvas
+
+
+def _plan_vertical_ranges(
+    projection: np.ndarray,
+    body_start: int,
+    height: int,
+    *,
+    target_height: int,
+    maximum_height: int,
+    header_height: int,
+    minimum_content_height: int,
+    search_radius: int,
+    fallback_overlap: int,
+    blank_ratio: float,
+    minimum_blank_height: int,
+) -> list[tuple[int, int, int, int, str]]:
+    gap = 10 if header_height else 0
+    body_height = height - body_start
+    capacity = maximum_height - header_height - gap
+    if capacity <= minimum_content_height:
+        raise RuntimeError(
+            f"标题上下文高 {header_height}px，留给正文的本地切块高度不足"
+        )
+
+    safe_capacity = max(minimum_content_height, capacity - fallback_overlap)
+    target_capacity = min(
+        safe_capacity,
+        max(minimum_content_height, target_height - header_height - gap),
+    )
+    part_count = max(1, math.ceil(body_height / target_capacity))
+    if part_count == 1:
+        return []
+
+    ideal_content = body_height / part_count
+    effective_minimum = min(
+        minimum_content_height,
+        max(128, int(ideal_content * 0.45)),
+    )
+    boundaries: list[tuple[int, str]] = []
+    previous = body_start
+    for index in range(1, part_count):
+        remaining = part_count - index
+        target = body_start + round(body_height * index / part_count)
+        lower = max(previous + effective_minimum, target - search_radius)
+        upper = min(
+            previous + safe_capacity,
+            height - remaining * effective_minimum,
+            target + search_radius,
+        )
+        boundary, method = _choose_boundary(
+            projection,
+            target,
+            lower,
+            upper,
+            blank_ratio=blank_ratio,
+            minimum_blank_height=minimum_blank_height,
+        )
+        boundaries.append((boundary, method))
+        previous = boundary
+
+    ranges: list[tuple[int, int, int, int, str]] = []
+    previous_boundary = body_start
+    for index in range(part_count):
+        next_boundary = boundaries[index][0] if index < len(boundaries) else height
+        next_method = boundaries[index][1] if index < len(boundaries) else "document_end"
+        previous_method = boundaries[index - 1][1] if index > 0 else "document_start"
+        top_overlap = fallback_overlap // 2 if previous_method == "fallback_overlap" else 0
+        bottom_overlap = (
+            fallback_overlap - fallback_overlap // 2
+            if next_method == "fallback_overlap"
+            else 0
+        )
+        content_start = max(body_start, previous_boundary - top_overlap)
+        content_end = min(height, next_boundary + bottom_overlap)
+        ranges.append(
+            (
+                content_start,
+                content_end,
+                max(0, previous_boundary - content_start),
+                max(0, content_end - next_boundary),
+                next_method,
+            )
+        )
+        previous_boundary = next_boundary
+    return ranges
+
+
 def create_local_long_parts(
     image_path: Path,
     output_root: Path,
@@ -184,8 +342,9 @@ def create_local_long_parts(
     white_threshold: int,
     blank_ratio: float,
     minimum_blank_height: int,
+    split_columns: bool = False,
 ) -> list[LocalLongPart]:
-    """生成带重复标题头的本地临时子块，并返回可审计的切割计划。"""
+    """生成按阅读顺序排列、且带重复标题头的本地临时子块。"""
 
     output_root.mkdir(parents=True, exist_ok=True)
     parts_dir = output_root / "parts"
@@ -195,118 +354,190 @@ def create_local_long_parts(
         source = source_image.convert("RGB")
         width, height = source.size
         header_height = min(max(0, header_height), height - 1)
-        gap = 10 if header_height else 0
         body_start = header_height
-        body_height = height - body_start
-        capacity = maximum_height - header_height - gap
-        if capacity <= minimum_content_height:
-            raise RuntimeError(
-                f"标题上下文高 {header_height}px，留给正文的本地切块高度不足"
+        gap = 10 if header_height else 0
+        full_header = (
+            source.crop((0, 0, width, header_height))
+            if header_height
+            else None
+        )
+        column_ranges = (
+            _detect_column_ranges(
+                source,
+                header_height,
+                white_threshold=white_threshold,
+                blank_ratio=blank_ratio,
             )
+            if split_columns
+            else [(0, width)]
+        )
 
-        # 为重叠兜底预留空间，保证最终复合子块不会越过 maximum_height。
-        safe_capacity = max(
-            minimum_content_height,
-            capacity - fallback_overlap,
-        )
-        target_capacity = min(
-            safe_capacity,
-            max(minimum_content_height, target_height - header_height - gap),
-        )
-        part_count = max(1, math.ceil(body_height / target_capacity))
-        if part_count == 1:
-            return []
-
-        projection = _row_ink_projection(
-            source,
-            sample_width=sample_width,
-            white_threshold=white_threshold,
-        )
-        ideal_content = body_height / part_count
-        boundaries: list[tuple[int, str]] = []
-        previous = body_start
-        effective_minimum = min(
-            minimum_content_height,
-            max(128, int(ideal_content * 0.45)),
-        )
-        for index in range(1, part_count):
-            remaining = part_count - index
-            target = body_start + round(body_height * index / part_count)
-            lower = max(
-                previous + effective_minimum,
-                target - search_radius,
+        parts: list[LocalLongPart] = []
+        for column_index, (x1, x2) in enumerate(column_ranges):
+            column = source.crop((x1, 0, x2, height))
+            projection = _row_ink_projection(
+                column,
+                sample_width=sample_width,
+                white_threshold=white_threshold,
             )
-            upper = min(
-                previous + safe_capacity,
-                height - remaining * effective_minimum,
-                target + search_radius,
-            )
-            boundary, method = _choose_boundary(
+            ranges = _plan_vertical_ranges(
                 projection,
-                target,
-                lower,
-                upper,
+                body_start,
+                height,
+                target_height=target_height,
+                maximum_height=maximum_height,
+                header_height=header_height,
+                minimum_content_height=minimum_content_height,
+                search_radius=search_radius,
+                fallback_overlap=fallback_overlap,
                 blank_ratio=blank_ratio,
                 minimum_blank_height=minimum_blank_height,
             )
-            boundaries.append((boundary, method))
-            previous = boundary
+            if not ranges:
+                return []
 
-        header = source.crop((0, 0, width, header_height)) if header_height else None
-        parts: list[LocalLongPart] = []
-        previous_boundary = body_start
-        for index in range(part_count):
-            next_boundary = boundaries[index][0] if index < len(boundaries) else height
-            next_method = boundaries[index][1] if index < len(boundaries) else "document_end"
-            previous_method = boundaries[index - 1][1] if index > 0 else "document_start"
-            top_overlap = (
-                fallback_overlap // 2
-                if previous_method == "fallback_overlap"
-                else 0
-            )
-            bottom_overlap = (
-                fallback_overlap - fallback_overlap // 2
-                if next_method == "fallback_overlap"
-                else 0
-            )
-            content_start = max(body_start, previous_boundary - top_overlap)
-            content_end = min(height, next_boundary + bottom_overlap)
-            content = source.crop((0, content_start, width, content_end))
-            output_height = content.height + (header_height + gap if header else 0)
-            if output_height > maximum_height:
-                raise RuntimeError(
-                    f"本地临时子块 {index} 高 {output_height}px，超过 {maximum_height}px"
+            fitted_header = None
+            if full_header is not None:
+                fitted_header = (
+                    full_header.copy()
+                    if len(column_ranges) == 1 and x1 == 0 and x2 == width
+                    else _fit_header_to_width(full_header, x2 - x1)
                 )
-
-            canvas = Image.new("RGB", (width, output_height), "white")
-            cursor = 0
-            if header is not None:
-                canvas.paste(header, (0, 0))
-                cursor = header_height + gap
-                draw = ImageDraw.Draw(canvas)
-                line_y = header_height + gap // 2
-                draw.line((0, line_y, width, line_y), fill=(190, 190, 190), width=1)
-            canvas.paste(content, (0, cursor))
-            file_name = (
-                f"part_{index:03d}_y{content_start:07d}_{content_end:07d}.png"
-            )
-            canvas.save(parts_dir / file_name, format="PNG", compress_level=4)
-            parts.append(
-                LocalLongPart(
-                    index=index,
-                    file_name=file_name,
-                    content_start_y=content_start,
-                    content_end_y=content_end,
-                    overlap_top=max(0, previous_boundary - content_start),
-                    overlap_bottom=max(0, content_end - next_boundary),
-                    cut_method=next_method,
-                    header_height=header_height,
-                    output_height=output_height,
+            for content_start, content_end, overlap_top, overlap_bottom, method in ranges:
+                content = source.crop((x1, content_start, x2, content_end))
+                output_height = content.height + (
+                    header_height + gap if fitted_header is not None else 0
                 )
-            )
-            previous_boundary = next_boundary
+                if output_height > maximum_height:
+                    raise RuntimeError(
+                        f"本地临时子块 {len(parts)} 高 {output_height}px，"
+                        f"超过 {maximum_height}px"
+                    )
+                canvas = Image.new("RGB", (x2 - x1, output_height), "white")
+                cursor = 0
+                if fitted_header is not None:
+                    canvas.paste(fitted_header, (0, 0))
+                    cursor = header_height + gap
+                    draw = ImageDraw.Draw(canvas)
+                    line_y = header_height + gap // 2
+                    draw.line(
+                        (0, line_y, canvas.width, line_y),
+                        fill=(190, 190, 190),
+                        width=1,
+                    )
+                canvas.paste(content, (0, cursor))
+                part_index = len(parts)
+                file_name = (
+                    f"part_{part_index:03d}_c{column_index:02d}_"
+                    f"x{x1:05d}_{x2:05d}_y{content_start:07d}_{content_end:07d}.png"
+                )
+                canvas.save(parts_dir / file_name, format="PNG", compress_level=4)
+                parts.append(
+                    LocalLongPart(
+                        index=part_index,
+                        file_name=file_name,
+                        content_start_x=x1,
+                        content_end_x=x2,
+                        content_start_y=content_start,
+                        content_end_y=content_end,
+                        overlap_top=overlap_top,
+                        overlap_bottom=overlap_bottom,
+                        cut_method=method,
+                        header_height=header_height,
+                        output_height=output_height,
+                        column_index=column_index,
+                        column_count=len(column_ranges),
+                    )
+                )
 
     return parts
+
+
+def _numbered_level(text: str) -> int | None:
+    value = text.strip()
+    arabic = re.match(r"^(\d+(?:\.\d+){0,4})(?:\s|[、．]|$)", value)
+    if arabic:
+        number = arabic.group(1)
+        if "." not in number and int(number) > 99:
+            return None
+        return min(5, number.count(".") + 2)
+    if re.match(r"^第[一二三四五六七八九十百0-9]+章", value):
+        return 2
+    if re.match(r"^第[一二三四五六七八九十百0-9]+[节条]", value):
+        return 3
+    if re.match(r"^[一二三四五六七八九十百]+[、．.]", value):
+        return 2
+    if re.match(r"^[（(][一二三四五六七八九十百0-9]+[）)]", value):
+        return 4
+    return None
+
+
+def restore_local_markdown_headings(markdown: str, pack: Any) -> str:
+    """利用小模型已检测层级和编号，把本地 OCR 漏掉的标题井号补回来。"""
+
+    lines = markdown.splitlines()
+    role = str(getattr(pack, "semantic_role", ""))
+    if role.startswith("table_of_contents"):
+        for index, line in enumerate(lines):
+            match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+            text = match.group(1) if match else line.strip()
+            if text and "目录" in text and len(text) <= 40:
+                lines[index] = f"# {text}"
+                break
+        return "\n".join(lines).strip()
+
+    hints: list[tuple[str, int]] = []
+    seen_ids: set[str] = set()
+    for raw in getattr(pack, "heading_hints", ()):
+        heading_id = str(raw.get("heading_id", ""))
+        level = int(raw.get("level", 0))
+        if heading_id and 1 <= level <= 5 and heading_id not in seen_ids:
+            seen_ids.add(heading_id)
+            hints.append((heading_id, level))
+    expected = {level: sum(item[1] == level for item in hints) for level in range(1, 6)}
+    recognized = {level: 0 for level in range(1, 6)}
+    hint_cursor = 0
+
+    for index, line in enumerate(lines):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        text = match.group(2)
+        hint_level = None
+        if hint_cursor < len(hints):
+            hint_level = hints[hint_cursor][1]
+            hint_cursor += 1
+        level = _numbered_level(text)
+        if level is None:
+            level = hint_level or len(match.group(1))
+        recognized[level] = recognized.get(level, 0) + 1
+        lines[index] = f"{'#' * level} {text}"
+
+    # 文档主标题通常没有编号。若原图明确检测到 H1，而模型连井号都漏了，
+    # 只允许请求开头第一个短行补成 H1。
+    if expected.get(1, 0) > recognized.get(1, 0):
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if len(stripped) <= 80 and stripped[-1:] not in "。；;，,":
+                lines[index] = f"# {stripped}"
+                recognized[1] += 1
+            break
+
+    # 只提升“原图标题预算仍有缺口”的强编号短行；普通（1）枚举不会无限升级。
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or len(stripped) > 80:
+            continue
+        if stripped[-1:] in "。；;，,":
+            continue
+        level = _numbered_level(stripped)
+        if level is None or recognized.get(level, 0) >= expected.get(level, 0):
+            continue
+        lines[index] = f"{'#' * level} {stripped}"
+        recognized[level] = recognized.get(level, 0) + 1
+    return "\n".join(lines).strip()
 
 
 def _normalized_heading(text: str) -> str:
@@ -336,13 +567,14 @@ def _strip_repeated_leading_headings(markdown: str, signatures: list[str]) -> st
     for line in lines:
         stripped = line.strip()
         match = re.match(r"^#{1,6}\s+(.+?)\s*$", stripped)
+        candidate = match.group(1) if match else stripped
         if (
             scanning_header
-            and match
+            and candidate
             and signature_index < len(signatures)
             and SequenceMatcher(
                 None,
-                _normalized_heading(match.group(1)),
+                _normalized_heading(candidate),
                 signatures[signature_index],
             ).ratio()
             >= 0.62
