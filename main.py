@@ -10,7 +10,7 @@ from afac_pipeline.common.hashing import discover_images, group_exact_duplicates
 from afac_pipeline.long import LongConfig, LongPipeline
 from afac_pipeline.long.步骤007_本地OCR识别 import LocalLongRecognizer
 from afac_pipeline.table import TableConfig, TablePipeline
-from afac_pipeline.table.local_ocr import LocalTableRecognizer
+from afac_pipeline.table.步骤010_本地OCR识别 import LocalTableRecognizer
 from afac_pipeline.common.local_ocr import CachedLocalOCR, RapidOCREngine
 from afac_pipeline.common.submission import combine_submissions
 from afac_pipeline.common.vlm_client import FinixDocClient, MAX_RETRY_COUNT

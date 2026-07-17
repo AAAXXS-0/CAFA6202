@@ -10,9 +10,9 @@ from PIL import Image
 
 from ..common.models import Box, DetectedBox
 from .config import TableConfig
-from .density_split import DensityBand, _runs, boxes_from_bands, find_density_bands
-from .grid import GridStructure, _whitespace_centers
-from .ink_region import InkRegionResult, detect_ink_regions
+from .步骤002_低密度分表 import DensityBand, _runs, boxes_from_bands, find_density_bands
+from .步骤004_网格与白带检测 import GridStructure, _whitespace_centers
+from .步骤001_墨水密度定位 import InkRegionResult, detect_ink_regions
 
 
 @dataclass(frozen=True)

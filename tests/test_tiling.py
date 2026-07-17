@@ -1,7 +1,7 @@
 import unittest
 
 from afac_pipeline.common.models import Box
-from afac_pipeline.table.tiling import plan_region_tiles
+from afac_pipeline.table.步骤007_像素重叠切块 import plan_region_tiles
 
 
 class TilingTest(unittest.TestCase):

@@ -9,7 +9,7 @@ from unittest.mock import patch
 from afac_pipeline.long.config import LongConfig
 from afac_pipeline.long.步骤006_全流程调度 import LongPipeline
 from afac_pipeline.table.config import TableConfig
-from afac_pipeline.table.pipeline import TablePipeline
+from afac_pipeline.table.步骤011_全流程调度 import TablePipeline
 
 
 class FakeClient:

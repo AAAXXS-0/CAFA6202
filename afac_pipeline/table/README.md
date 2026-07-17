@@ -24,7 +24,7 @@ flowchart TD
     J -. "边界无法规划" .-> N["像素切片 + 自适应重叠兜底"]
     Y --> Z{"选择识别后端"}
     J --> Z
-    Z -- "官方模式" --> O["FinixDoc-VL 输出 HTML table"]
+    Z -- "官方模式" --> O["FinixDoc-VL 返回 HTML 或 Markdown 表格"]
     Z -- "FireRed 本地模式" --> FO["单模型输出 HTML table"]
     FO --> Q
     Z -- "本地模式" --> LO["约 2000px 重叠 OCR 小块"]
@@ -66,6 +66,24 @@ v6 先把原图固定缩到 20%，再缩到该分析图的 25%，所以密度图
 这只限制内部分析图，不改变大模型或本地 OCR 请求图的 3900px 上限。
 
 ## 2. 准备图表
+
+代码按真实执行流程编号，建议按下面顺序阅读：
+
+```text
+步骤001_墨水密度定位.py
+步骤002_低密度分表.py
+步骤003_区域检测器入口.py
+步骤004_网格与白带检测.py
+步骤005_黑线白带结构检测.py
+步骤006_逻辑网格切块.py
+步骤007_像素重叠切块.py
+步骤008_Markdown表格合并.py
+步骤009_HTML表格软对齐.py
+步骤010_本地OCR识别.py
+步骤011_全流程调度.py
+工具/
+归档/
+```
 
 ```bash
 python main.py prepare-tables \
@@ -143,7 +161,7 @@ python main.py run-tables \
   --credentials-file FinixDoc_VL调用.txt \
   --user-id finixB2002 \
   --request-timeout 240 \
-  --max-retries 50 \
+  --max-retries 15 \
   --output-csv outputs/table_submission.csv
 ```
 
@@ -163,7 +181,7 @@ python main.py run-tables \
 ## 7. 校验
 
 ```bash
-python afac_pipeline/table/tools/validate_prepared.py --manifest work/tables/dataset_manifest.json
+python afac_pipeline/table/工具/工具001_检查准备结果.py --manifest work/tables/dataset_manifest.json
 python -m unittest discover -s tests -v
 ```
 
@@ -172,7 +190,7 @@ python -m unittest discover -s tests -v
 这个工具可以独立复现“强缩小后的二维墨水密度如何找到完整表格”，不负责内部行列判断：
 
 ```bash
-python afac_pipeline/table/tools/experiment_ink_region.py \
+python afac_pipeline/table/工具/工具002_墨水区域实验.py \
   --image "待测试图片.jpg" \
   --output-dir "work/验证/无模型墨水定位" \
   --yolo-manifest "原粗流程单图清单.json"
@@ -184,4 +202,4 @@ python afac_pipeline/table/tools/experiment_ink_region.py \
 
 ### 暂存方案
 
-横线和竖线分别使用非等比例分析图的方案暂不实施，设计细节保存在[非等比例缩放方案备忘](./非等比例缩放方案备忘.md)。正式请求图始终保持原始宽高比。
+横线和竖线分别使用非等比例分析图的方案暂不实施，设计细节保存在[非等比例缩放方案备忘](./归档/非等比例缩放方案备忘.md)。正式请求图始终保持原始宽高比。

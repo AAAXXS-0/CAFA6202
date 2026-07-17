@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from afac_pipeline.table.ink_region import (  # noqa: E402
+from afac_pipeline.table.步骤001_墨水密度定位 import (  # noqa: E402
     density_visualization,
     detect_ink_regions,
 )

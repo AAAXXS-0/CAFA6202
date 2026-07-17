@@ -8,7 +8,7 @@ from html.parser import HTMLParser
 import re
 
 from ..common.models import TilePlan
-from .markdown_merge import MarkdownMergeError, parse_first_table
+from .步骤008_Markdown表格合并 import MarkdownMergeError, parse_first_table
 
 
 class HtmlTableMergeError(RuntimeError):

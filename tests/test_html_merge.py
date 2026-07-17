@@ -1,7 +1,7 @@
 import unittest
 
 from afac_pipeline.common.models import Box, TilePlan
-from afac_pipeline.table.html_merge import (
+from afac_pipeline.table.步骤009_HTML表格软对齐 import (
     merge_logical_tiles,
     normalize_table_response,
     normalize_table_response_soft,

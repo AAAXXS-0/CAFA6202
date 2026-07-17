@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from afac_pipeline.table.density_split import boxes_from_bands, find_density_bands
+from afac_pipeline.table.步骤002_低密度分表 import boxes_from_bands, find_density_bands
 
 
 class DensitySplitTest(unittest.TestCase):

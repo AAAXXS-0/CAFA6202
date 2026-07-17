@@ -2,7 +2,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from afac_pipeline.table.detectors import find_content_box
+from afac_pipeline.table.步骤003_区域检测器入口 import find_content_box
 
 
 class ContentBoxTest(unittest.TestCase):

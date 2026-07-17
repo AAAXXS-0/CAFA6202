@@ -9,7 +9,7 @@ AFAC2026_challger/
 ├── afac_pipeline/
 │   ├── common/                 # SHA-256、图像后端、缓存、识别客户端、CSV
 │   ├── long/                   # 长图代码、配置示例和分支 README
-│   └── table/                  # 图表代码、配置、文档和分支工具
+│   └── table/                  # 图表步骤001～011、配置、工具、归档和分支 README
 ├── experiments/legacy_long/   # 早期随机切图和模型试验脚本，仅供追溯
 ├── tests/                     # 自动化测试
 ├── requirements-firered.txt   # FireRed-OCR-2B 独立环境依赖
@@ -27,7 +27,7 @@ AFAC2026_challger/
 分支文档：
 
 - [长图分支](afac_pipeline/long/README.md)：严格 Title 0.60、独立全宽墨迹扫描、排版样式聚类、H2/H3 语义切块和祖先标题上下文；历史标题算法已归档，旧安全切割保留为 legacy。
-- [图表分支](afac_pipeline/table/README.md)：密度分表、黑白边界检测、逻辑网格切块、HTML/Markdown 表格拼接和失败处理。
+- [图表分支](afac_pipeline/table/README.md)：密度分表、横线 90%/竖线中段 95% 检测、逻辑网格切块、HTML/Markdown 表格拼接和失败处理。
 
 ## 普通预处理环境
 
@@ -67,7 +67,7 @@ AFAC_FIRERED_DRY_RUN=1 /usr/bin/python3 一键生成FireRed模型CSV.py
 
 输出保存在 `work/FireRed单模型测试/`，每张图片旁边还会生成包含耗时、峰值显存和模型签名的 `firered_raw/*.json`。测试入口固定使用 FireRed 官方 Markdown 转换提示词，不加载 Paddle、Nemotron 或第二份 FireRed。
 
-正式流程固定 `max_workers=1`，长图约 80 万像素，图表约 160 万像素，两类输出上限均为 4096 token。实测正文块峰值显存 4.15 GiB；2199×707 宽表峰值 4.48 GiB、94.6 秒，完整输出 14×16 的 224 个单元格。
+正式流程固定 `max_workers=1`，长图约 80 万像素、输出上限 4096 token；图表约 160 万像素、输出上限 8192 token。实测正文块峰值显存 4.15 GiB；2199×707 宽表峰值 4.48 GiB、94.6 秒，完整输出 14×16 的 224 个单元格。
 
 需要重建环境时：
 

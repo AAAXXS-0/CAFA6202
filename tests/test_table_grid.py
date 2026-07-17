@@ -5,11 +5,11 @@ from PIL import Image, ImageDraw
 
 from afac_pipeline.common.models import Box
 from afac_pipeline.table.config import TableConfig
-from afac_pipeline.table.grid import (
+from afac_pipeline.table.步骤004_网格与白带检测 import (
     _whitespace_dilate_kernels,
     detect_grid_structure,
 )
-from afac_pipeline.table.grid_tiling import plan_grid_tiles
+from afac_pipeline.table.步骤006_逻辑网格切块 import plan_grid_tiles
 
 
 class TableGridTest(unittest.TestCase):

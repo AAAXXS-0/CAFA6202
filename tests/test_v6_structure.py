@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 
 from afac_pipeline.common.models import Box
 from afac_pipeline.table.config import TableConfig
-from afac_pipeline.table.v6_structure import (
+from afac_pipeline.table.步骤005_黑线白带结构检测 import (
     adaptive_line_segments,
     detect_v6_grid,
 )

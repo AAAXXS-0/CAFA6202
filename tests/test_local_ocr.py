@@ -5,7 +5,7 @@ from afac_pipeline.common.models import Box
 from afac_pipeline.long.步骤001_数据定义 import Heading
 from afac_pipeline.long.步骤005_大模型请求打包 import RecognitionPack
 from afac_pipeline.long.步骤007_本地OCR识别 import _pack_markdown
-from afac_pipeline.table.local_ocr import LocalTableRecognizer, _matrix_to_html
+from afac_pipeline.table.步骤010_本地OCR识别 import LocalTableRecognizer, _matrix_to_html
 
 
 class LocalOCRTest(unittest.TestCase):

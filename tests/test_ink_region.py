@@ -3,8 +3,8 @@ import unittest
 from PIL import Image, ImageDraw
 
 from afac_pipeline.table.config import TableConfig
-from afac_pipeline.table.detectors import InkTableDetector, create_detector
-from afac_pipeline.table.ink_region import detect_ink_regions
+from afac_pipeline.table.步骤003_区域检测器入口 import InkTableDetector, create_detector
+from afac_pipeline.table.步骤001_墨水密度定位 import detect_ink_regions
 
 
 class InkRegionTest(unittest.TestCase):

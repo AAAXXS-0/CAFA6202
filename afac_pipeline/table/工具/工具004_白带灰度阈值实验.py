@@ -15,8 +15,8 @@ if __package__ in {None, ""}:
 
 from afac_pipeline.common.models import Box  # noqa: E402
 from afac_pipeline.table.config import TableConfig  # noqa: E402
-from afac_pipeline.table.grid import _whitespace_centers  # noqa: E402
-from afac_pipeline.table.tools.experiment_density_split_and_boundaries import (  # noqa: E402
+from afac_pipeline.table.步骤004_网格与白带检测 import _whitespace_centers  # noqa: E402
+from afac_pipeline.table.工具.工具003_密度分表与黑白边界实验 import (  # noqa: E402
     binary_preview,
     draw_full_lines,
     whitespace_debug_data,

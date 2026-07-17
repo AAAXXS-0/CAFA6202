@@ -17,7 +17,7 @@ from tempfile import TemporaryDirectory
 
 from ..common.cache import ResultCache
 from .config import TableConfig
-from .detectors import (
+from .步骤003_区域检测器入口 import (
     InkTableDetector,
     ProjectionTableDetector,
     create_detector,
@@ -25,17 +25,17 @@ from .detectors import (
 )
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
-from .grid import GridStructure, detect_grid_structure
-from .grid_tiling import plan_grid_tiles
-from .html_merge import (
+from .步骤004_网格与白带检测 import GridStructure, detect_grid_structure
+from .步骤006_逻辑网格切块 import plan_grid_tiles
+from .步骤009_HTML表格软对齐 import (
     HtmlTableMergeError,
     merge_logical_tiles,
     normalize_table_response,
     normalize_table_response_soft,
 )
-from .ink_region import density_visualization
-from .markdown_merge import MarkdownMergeError, merge_markdown_grid
-from .v6_structure import (
+from .步骤001_墨水密度定位 import density_visualization
+from .步骤008_Markdown表格合并 import MarkdownMergeError, merge_markdown_grid
+from .步骤005_黑线白带结构检测 import (
     V6RegionResult,
     detect_v6_grid,
     detect_v6_regions,
@@ -43,7 +43,7 @@ from .v6_structure import (
 )
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
-from .tiling import plan_region_tiles
+from .步骤007_像素重叠切块 import plan_region_tiles
 from ..common.vlm_client import (
     CHAT_PROTOCOL,
     FinixDocClient,

@@ -1,7 +1,7 @@
 """图表解析分支的公共入口。"""
 
 from .config import TableConfig
-from .local_ocr import LocalTableRecognizer
-from .pipeline import TablePipeline
+from .步骤010_本地OCR识别 import LocalTableRecognizer
+from .步骤011_全流程调度 import TablePipeline
 
 __all__ = ["TableConfig", "TablePipeline", "LocalTableRecognizer"]

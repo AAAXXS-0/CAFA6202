@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .config import TableConfig
-from .ink_region import InkRegionResult, density_visualization, detect_ink_regions
+from .步骤001_墨水密度定位 import InkRegionResult, density_visualization, detect_ink_regions
 from ..common.models import Box, DetectedBox
 
 

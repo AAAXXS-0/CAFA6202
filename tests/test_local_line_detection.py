@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from afac_pipeline.table.tools.experiment_density_split_and_boundaries import (
+from afac_pipeline.table.工具.工具003_密度分表与黑白边界实验 import (
     adaptive_line_segments,
     dense_content_box,
 )

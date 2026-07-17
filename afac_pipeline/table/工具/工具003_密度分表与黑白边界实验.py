@@ -17,16 +17,16 @@ if __package__ in {None, ""}:
 
 from afac_pipeline.common.models import Box  # noqa: E402
 from afac_pipeline.table.config import TableConfig  # noqa: E402
-from afac_pipeline.table.density_split import (  # noqa: E402
+from afac_pipeline.table.步骤002_低密度分表 import (  # noqa: E402
     _runs,
     boxes_from_bands,
     find_density_bands,
 )
-from afac_pipeline.table.grid import (  # noqa: E402
+from afac_pipeline.table.步骤004_网格与白带检测 import (  # noqa: E402
     _whitespace_centers,
     _whitespace_dilate_kernels,
 )
-from afac_pipeline.table.ink_region import density_visualization, detect_ink_regions  # noqa: E402
+from afac_pipeline.table.步骤001_墨水密度定位 import density_visualization, detect_ink_regions  # noqa: E402
 
 
 @dataclass(frozen=True)
