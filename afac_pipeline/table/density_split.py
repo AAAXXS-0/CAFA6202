@@ -154,10 +154,22 @@ def _select_axis_bands(
             and all("filled" not in band.source for band in group)
         )
     ]
-    selected = [
-        max(group, key=lambda band: (band.end - band.start, -band.mean_density))
-        for group in groups
-    ]
+    selected: list[DensityBand] = []
+    for group in groups:
+        # 横向表间区域如果被下一张表的标题切成上下两段，切口必须落在
+        # 标题上方，让标题跟随下面的表。filled候选仍用于确认这是同一个
+        # 宽分隔区，但不能再用它跨过标题后从整段中央落刀。
+        raw_horizontal = [
+            band
+            for band in group
+            if band.axis == "horizontal" and band.source == "raw"
+        ]
+        if raw_horizontal:
+            selected.append(min(raw_horizontal, key=lambda band: band.start))
+        else:
+            selected.append(
+                max(group, key=lambda band: (band.end - band.start, -band.mean_density))
+            )
     if len(selected) >= 2:
         spacing = float(np.median(np.diff([band.center for band in selected])))
         # 如果候选低谷像单元格一样密集重复，它们是内部行列而不是同图异表。
@@ -170,20 +182,21 @@ def _select_axis_bands(
 def find_density_bands(
     density: np.ndarray,
     *,
-    maximum_density: float = 0.03,
+    maximum_density: float = 0.02,
     minimum_band_ratio: float = 0.007,
     maximum_interrupt_ratio: float = 0.008,
     edge_margin_ratio: float = 0.025,
     content_density: float = 0.03,
-    maximum_band_mean: float = 0.02,
+    maximum_band_mean: float = 0.015,
     support_ratio: float = 0.03,
     cluster_ratio: float = 0.08,
     minimum_region_ratio: float = 0.12,
 ) -> tuple[list[DensityBand], list[DensityBand]]:
     """返回单一主方向上的分表带，不把密集单元格空隙当成同图异表。"""
 
+    row_profile = density.mean(axis=1)
     rows = _profile_bands(
-        density.mean(axis=1),
+        row_profile,
         "horizontal",
         maximum_density=maximum_density,
         minimum_band_ratio=minimum_band_ratio,
@@ -211,6 +224,29 @@ def find_density_bands(
         cluster_ratio=cluster_ratio,
         minimum_region_ratio=minimum_region_ratio,
     )
+    # filled候选说明一整段表间空白被少量标题墨迹打断。最终切口改放到
+    # 第一段标题前的纯空白中，保证下表标题不会再被分给上一张表。
+    minimum_band = max(3, round(len(row_profile) * minimum_band_ratio))
+    adjusted_rows: list[DensityBand] = []
+    for band in rows:
+        interruptions = _runs(
+            row_profile[band.start : band.end] > maximum_density
+        )
+        if "filled" in band.source and interruptions:
+            end = band.start + interruptions[0][0]
+            if end - band.start >= minimum_band:
+                adjusted_rows.append(
+                    DensityBand(
+                        "horizontal",
+                        band.start,
+                        end,
+                        float(row_profile[band.start:end].mean()),
+                        "raw-before-title",
+                    )
+                )
+                continue
+        adjusted_rows.append(band)
+    rows = adjusted_rows
     columns = _select_axis_bands(
         columns,
         coarse_max_side=coarse_max_side,

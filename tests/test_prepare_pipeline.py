@@ -43,7 +43,7 @@ class PreparePipelineTest(unittest.TestCase):
             prepared = json.loads(image_manifest.read_text(encoding="utf-8"))
             self.assertGreaterEqual(len(prepared["regions"]), 1)
 
-    def test_prepare_large_grid_builds_repeated_context_tiles(self) -> None:
+    def test_prepare_large_grid_keeps_aspect_without_default_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             input_dir = root / "images"
@@ -72,8 +72,8 @@ class PreparePipelineTest(unittest.TestCase):
             prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
             region = prepared["regions"][0]
             self.assertEqual(region["grid_source"], "ruled-lines")
-            self.assertTrue(any(tile["header_context_rows"] for tile in region["tiles"]))
-            self.assertTrue(any(tile["stub_context_columns"] for tile in region["tiles"]))
+            self.assertTrue(all(not tile["header_context_rows"] for tile in region["tiles"]))
+            self.assertTrue(all(not tile["stub_context_columns"] for tile in region["tiles"]))
             for tile in region["tiles"]:
                 tile_path = prepared_path.parent / "tiles" / tile["file_name"]
                 with Image.open(tile_path) as output:

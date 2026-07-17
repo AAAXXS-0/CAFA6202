@@ -1,7 +1,11 @@
 import unittest
 
 from afac_pipeline.common.models import Box, TilePlan
-from afac_pipeline.table.html_merge import merge_logical_tiles, normalize_table_response
+from afac_pipeline.table.html_merge import (
+    merge_logical_tiles,
+    normalize_table_response,
+    normalize_table_response_soft,
+)
 
 
 def tile(column_index: int, start: int, end: int, stub: int) -> TilePlan:
@@ -33,6 +37,34 @@ class HtmlMergeTest(unittest.TestCase):
         self.assertIn('colspan="2"', html)
         self.assertEqual(shape, {"rows": 2, "columns": 2})
 
+
+    def test_soft_alignment_restores_internal_blank_columns(self) -> None:
+        response = (
+            "<table><tr><td>A</td><td>B</td><td>C</td></tr></table>"
+        )
+        html, report = normalize_table_response_soft(
+            response,
+            1,
+            5,
+            [[True, False, True, False, True]],
+        )
+        self.assertEqual(html.count("<td></td>"), 2)
+        self.assertTrue(report["warnings"])
+
+    def test_soft_alignment_restores_omitted_blank_row(self) -> None:
+        response = (
+            "<table>"
+            "<tr><td>A</td></tr>"
+            "<tr><td>C</td></tr>"
+            "</table>"
+        )
+        html, report = normalize_table_response_soft(
+            response,
+            3,
+            1,
+            [[True], [False], [True]],
+        )
+        self.assertEqual(html.count("<tr>"), 3)
 
 if __name__ == "__main__":
     unittest.main()

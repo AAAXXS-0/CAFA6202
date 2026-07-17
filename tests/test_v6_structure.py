@@ -53,8 +53,8 @@ class V6StructureTest(unittest.TestCase):
         self.assertTrue(grid.available)
         self.assertTrue(diagnostics.row_source.startswith("black-line"))
         self.assertEqual(diagnostics.column_source, "white-band")
-        self.assertEqual(grid.row_boundaries[0], 2000)
-        self.assertEqual(grid.row_boundaries[-1], 6200)
+        self.assertEqual(grid.row_boundaries[0], 2200)
+        self.assertEqual(grid.row_boundaries[-1], 5960)
         self.assertEqual(grid.column_boundaries[0], 1000)
         self.assertEqual(grid.column_boundaries[-1], 7000)
 

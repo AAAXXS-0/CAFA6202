@@ -15,6 +15,7 @@ class DensitySplitTest(unittest.TestCase):
         horizontal, vertical = find_density_bands(density)
         boxes = boxes_from_bands(300, 200, horizontal, vertical, density)
         self.assertTrue(horizontal)
+        self.assertLess(horizontal[0].center, 98)
         self.assertFalse(vertical)
         self.assertEqual(len(boxes), 2)
 

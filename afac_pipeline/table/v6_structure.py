@@ -216,17 +216,20 @@ def adaptive_line_segments(
 
 
 def _map_centers(
-    centers: list[int], preview_length: int, source_start: int, source_length: int
+    centers: list[int], preview_length: int, source_start: int, source_length: int,
+    *, include_outer: bool,
 ) -> tuple[int, ...]:
-    """加入外框并映射回原图；只去掉缩放取整后完全重合的边界。"""
+    """映射检测边界；只有白带模式才使用内容框外沿补齐首尾。"""
 
-    local = [0, *sorted(set(centers)), preview_length]
+    detected = sorted(set(centers))
+    local = [0, *detected, preview_length] if include_outer else detected
     mapped = [
         source_start + round(value * source_length / preview_length)
         for value in local
     ]
-    mapped[0] = source_start
-    mapped[-1] = source_start + source_length
+    if include_outer:
+        mapped[0] = source_start
+        mapped[-1] = source_start + source_length
     return tuple(dict.fromkeys(mapped))
 
 
@@ -265,10 +268,12 @@ def detect_v6_grid(
     if not row_centers or not column_centers:
         return GridStructure("unavailable", (), ()), diagnostics
     rows = _map_centers(
-        row_centers, analysis_image.height, source_region.y1, source_region.height
+        row_centers, analysis_image.height, source_region.y1, source_region.height,
+        include_outer=not row_is_black,
     )
     columns = _map_centers(
-        column_centers, analysis_image.width, source_region.x1, source_region.width
+        column_centers, analysis_image.width, source_region.x1, source_region.width,
+        include_outer=not column_is_black,
     )
     if len(rows) < 2 or len(columns) < 2:
         return GridStructure("unavailable", (), ()), diagnostics

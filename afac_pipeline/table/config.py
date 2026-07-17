@@ -30,8 +30,6 @@ class TableConfig:
     table_density_scale: float = 0.25
     table_analysis_max_side: int = 4608
     max_vlm_side: int = 3900
-    # 极扁切片会让视觉模型把多行误看成一行；只纵向拉伸到该宽高比。
-    max_vlm_aspect_ratio: float = 4.0
     tile_overlap: int = 160
     single_tile_min_scale: float = 0.65
     table_box_padding_ratio: float = 0.015
@@ -53,8 +51,8 @@ class TableConfig:
     whitespace_dilate_ratio: float = 0.004
     whitespace_horizontal_dilate_ratio: float | None = 0.0015
     whitespace_vertical_dilate_ratio: float | None = 0.004
-    repeat_header_rows: int = 1
-    repeat_stub_columns: int = 1
+    repeat_header_rows: int = 0
+    repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
     # 图片尺寸能装下，不代表几千个单元格也能一次写完。
     max_logical_cells_per_tile: int = 560
@@ -62,7 +60,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v8-output-budget-aspect"
+    pipeline_version: str = "table-v9-soft-grid-no-stretch"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -79,8 +77,6 @@ class TableConfig:
             raise ValueError("table_analysis_max_side 应位于 512 到 8192 之间")
         if not 512 <= self.max_vlm_side <= 4096:
             raise ValueError("max_vlm_side 应位于 512 到 4096 之间")
-        if not 1.5 <= self.max_vlm_aspect_ratio <= 12:
-            raise ValueError("图表切片最大宽高比应位于 1.5 到 12 之间")
         if not 0 <= self.tile_overlap < self.max_vlm_side:
             raise ValueError("tile_overlap 必须小于 max_vlm_side")
         if not 0 < self.single_tile_min_scale <= 1:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -27,7 +27,12 @@ from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
 from .grid import GridStructure, detect_grid_structure
 from .grid_tiling import plan_grid_tiles
-from .html_merge import HtmlTableMergeError, merge_logical_tiles, normalize_table_response
+from .html_merge import (
+    HtmlTableMergeError,
+    merge_logical_tiles,
+    normalize_table_response,
+    normalize_table_response_soft,
+)
 from .ink_region import density_visualization
 from .markdown_merge import MarkdownMergeError, merge_markdown_grid
 from .v6_structure import (
@@ -290,76 +295,6 @@ class TablePipeline:
             _json_dump(analysis_dir / f"region_{region_index:03d}_diagnostics.json", diagnostic_data)
         return grid
 
-    def _trim_empty_outer_rows(
-        self,
-        image_path: Path,
-        region: Box,
-        grid: GridStructure,
-    ) -> tuple[Box, GridStructure]:
-        """删除只含网格线的最外层空带；中间空行和带字边缘行不动。"""
-
-        boundaries = list(grid.row_boundaries)
-        if len(boundaries) <= 2:
-            return region, grid
-        with Image.open(image_path) as source:
-            gray = np.asarray(
-                source.convert("L").crop(
-                    (region.x1, region.y1, region.x2, region.y2)
-                ),
-                dtype=np.uint8,
-            )
-
-        def has_text(start: int, end: int) -> bool:
-            band = gray[start - region.y1 : end - region.y1]
-            if band.size == 0:
-                return False
-            ink = band < self.config.grid_white_threshold
-            # 去掉贯穿大半区域的横向/纵向网格线，只看短文字笔画。
-            ink[ink.mean(axis=1) > 0.65, :] = False
-            ink[:, ink.mean(axis=0) > 0.65] = False
-            return int(np.count_nonzero(ink)) > max(
-                8, round(ink.size * 0.0005)
-            )
-
-        changed = False
-        # 只删一层，并要求相邻内层确实有文字。纯网格、整表空白或连续
-        # 空行都保持原样，避免为了“清边”把合法结构逐层吃掉。
-        if (
-            len(boundaries) > 3
-            and not has_text(boundaries[0], boundaries[1])
-            and has_text(boundaries[1], boundaries[2])
-        ):
-            boundaries.pop(0)
-            changed = True
-        if (
-            len(boundaries) > 3
-            and not has_text(boundaries[-2], boundaries[-1])
-            and has_text(boundaries[-3], boundaries[-2])
-        ):
-            boundaries.pop()
-            changed = True
-        if not changed:
-            return region, grid
-        trimmed = Box(region.x1, boundaries[0], region.x2, boundaries[-1])
-        return trimmed, GridStructure(
-            f"{grid.source}:trim-empty-edge",
-            tuple(boundaries),
-            grid.column_boundaries,
-        )
-
-
-    def _fit_tile_output_aspect(self, plan: TilePlan) -> TilePlan:
-        """只纵向拉伸极扁切片，让模型能分清多行；逻辑坐标保持不变。"""
-
-        minimum_height = round(
-            plan.output_width / self.config.max_vlm_aspect_ratio
-        )
-        if plan.output_height >= minimum_height:
-            return plan
-        return replace(
-            plan,
-            output_height=min(self.config.max_vlm_side, minimum_height),
-        )
 
     def _save_tile(
         self, image_path: Path, output_path: Path, plan: TilePlan,
@@ -536,8 +471,11 @@ class TablePipeline:
             grid = self._analyze_grid(image_path, region_box, region_index, image_dir)
             plans = []
             if grid.available:
-                region_box, grid = self._trim_empty_outer_rows(
-                    image_path, region_box, grid
+                region_box = Box(
+                    grid.column_boundaries[0],
+                    grid.row_boundaries[0],
+                    grid.column_boundaries[-1],
+                    grid.row_boundaries[-1],
                 )
                 plans = plan_grid_tiles(
                     region_box, region_index, grid.row_boundaries, grid.column_boundaries,
@@ -560,7 +498,6 @@ class TablePipeline:
                     region_box, region_index, self.config.max_vlm_side,
                     self.config.tile_overlap, self.config.single_tile_min_scale,
                 )
-            plans = [self._fit_tile_output_aspect(plan) for plan in plans]
             for plan in plans:
                 self._save_tile(
                     image_path, tiles_dir / plan.file_name, plan,
@@ -661,15 +598,73 @@ class TablePipeline:
             tiling_mode=str(raw.get("tiling_mode", "pixel_overlap")),
         )
 
+
+    def _tile_ink_mask(
+        self,
+        gray: np.ndarray,
+        row_boundaries: list[int],
+        column_boundaries: list[int],
+        tile: TilePlan,
+    ) -> list[list[bool]]:
+        """判断每个逻辑格是否真的有文字墨迹，供模型省略空格时软对齐。"""
+
+        row_indices = [
+            *range(tile.header_context_rows),
+            *range(tile.logical_row_start, tile.logical_row_end),
+        ]
+        column_indices = [
+            *range(tile.stub_context_columns),
+            *range(tile.logical_column_start, tile.logical_column_end),
+        ]
+        result: list[list[bool]] = []
+        for row in row_indices:
+            values: list[bool] = []
+            y1, y2 = row_boundaries[row], row_boundaries[row + 1]
+            for column in column_indices:
+                x1 = column_boundaries[column]
+                x2 = column_boundaries[column + 1]
+                # 向内缩一点，避免把单元格四周的黑色网格线当成文字。
+                inset_x = min(max(1, (x2 - x1) // 10), max(1, (x2 - x1 - 1) // 3))
+                inset_y = min(max(1, (y2 - y1) // 10), max(1, (y2 - y1 - 1) // 3))
+                inner = gray[
+                    y1 + inset_y : max(y1 + inset_y + 1, y2 - inset_y),
+                    x1 + inset_x : max(x1 + inset_x + 1, x2 - inset_x),
+                ]
+                ink_pixels = int(
+                    np.count_nonzero(inner < self.config.grid_white_threshold)
+                )
+                values.append(
+                    ink_pixels > max(2, round(inner.size * 0.003))
+                )
+            result.append(values)
+        return result
+
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         region_markdowns: list[str] = []
         cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
         completed_tiles = 0
+        with Image.open(image_manifest["image"]["path"]) as source:
+            source_gray = np.asarray(
+                source.convert("L"),
+                dtype=np.uint8,
+            )
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
             plans = [self._tile_from_dict(raw) for raw in region["tiles"]]
+            row_boundaries = [
+                int(value) for value in region.get("row_boundaries", [])
+            ]
+            column_boundaries = [
+                int(value) for value in region.get("column_boundaries", [])
+            ]
+            tile_ink_masks = {
+                (plan.row_index, plan.column_index): self._tile_ink_mask(
+                    source_gray, row_boundaries, column_boundaries, plan
+                )
+                for plan in plans
+            } if row_boundaries and column_boundaries else {}
             response_dir = manifest_path.parent / "responses"
             response_dir.mkdir(parents=True, exist_ok=True)
             for raw_tile in region["tiles"]:
@@ -685,8 +680,9 @@ class TablePipeline:
                 markdown = self.cache.get_tile(cache_key)
                 source = "缓存"
                 if markdown is None:
-                    # 参数升级后尝试迁移旧成功缓存；截断或行列不符的响应
-                    # 不迁移，仍由新参数重新识别。
+                    # 参数升级后尝试迁移旧成功缓存。这里只检查响应能否解析；
+                    # 行列差异由后面的墨迹软对齐处理并写入 warning，避免把
+                    # 只是省略空行空列的结果再次送进模型。
                     for legacy_model in _table_legacy_cache_models(client):
                         legacy_key = self.cache.tile_key(
                             image_bytes, prompt, legacy_model
@@ -696,19 +692,8 @@ class TablePipeline:
                             continue
                         if tile.tiling_mode == "logical_grid":
                             try:
-                                _, actual = normalize_table_response(candidate)
+                                normalize_table_response(candidate)
                             except HtmlTableMergeError:
-                                continue
-                            expected_rows = tile.header_context_rows + (
-                                tile.logical_row_end - tile.logical_row_start
-                            )
-                            expected_columns = tile.stub_context_columns + (
-                                tile.logical_column_end - tile.logical_column_start
-                            )
-                            if (
-                                actual["rows"] != expected_rows
-                                or actual["columns"] > expected_columns
-                            ):
                                 continue
                         markdown = candidate
                         source = "兼容缓存"
@@ -754,31 +739,39 @@ class TablePipeline:
             try:
                 if plans and plans[0].tiling_mode == "logical_grid":
                     if len(contents) == 1:
-                        region_markdown, actual = normalize_table_response(
-                            next(iter(contents.values()))
-                        )
                         expected_rows = len(region.get("row_boundaries", [])) - 1
                         expected_columns = len(region.get("column_boundaries", [])) - 1
+                        key = next(iter(contents))
+                        region_markdown, actual = normalize_table_response_soft(
+                            contents[key],
+                            expected_rows,
+                            expected_columns,
+                            tile_ink_masks.get(key),
+                        )
                         quality = {
                             "logical_rows": expected_rows,
                             "logical_columns": expected_columns,
                             "actual_rows": actual["rows"],
                             "actual_columns": actual["columns"],
-                            "status": "ok" if (
-                                actual["rows"] == expected_rows
-                                and actual["columns"] == expected_columns
-                            ) else "warning",
+                            "warnings": actual["warnings"],
+                            "status": "warning" if actual["warnings"] else "ok",
                         }
                     else:
                         region_markdown, quality = merge_logical_tiles(
                             contents, plans,
                             len(region["row_boundaries"]) - 1,
                             len(region["column_boundaries"]) - 1,
+                            tile_ink_masks,
                         )
                     _json_dump(
                         manifest_path.parent / "quality" / f"region_{region['index']:03d}.json",
                         quality,
                     )
+                    for warning in quality.get("warnings", []):
+                        print(
+                            f"[图表警告] 区域 {region['index'] + 1}：{warning}",
+                            flush=True,
+                        )
                 else:
                     region_markdown = (
                         next(iter(contents.values()))
@@ -786,8 +779,24 @@ class TablePipeline:
                         else merge_markdown_grid(contents)
                     )
             except (MarkdownMergeError, HtmlTableMergeError) as error:
+                warning_data = {
+                    "status": "warning",
+                    "region_index": region["index"],
+                    "error": str(error),
+                    "fallback": "按切片顺序保留模型原始输出",
+                    "response_files": [
+                        f"responses/{Path(plan.file_name).stem}.md"
+                        for plan in plans
+                    ],
+                }
                 _json_dump(
-                    manifest_path.parent / "merge_error.json",
+                    manifest_path.parent
+                    / "quality"
+                    / f"region_{region['index']:03d}.json",
+                    warning_data,
+                )
+                _json_dump(
+                    manifest_path.parent / "merge_warning.json",
                     {
                         "region_index": region["index"],
                         "error": str(error),
@@ -797,9 +806,14 @@ class TablePipeline:
                         },
                     },
                 )
-                raise RuntimeError(
-                    f"{manifest_path.parent.name} 的表格切片无法可靠合并；原始响应已保留"
-                ) from error
+                print(
+                    f"[图表警告] 区域 {region['index'] + 1} 无法可靠合并："
+                    f"{error}；已保留模型原始输出继续生成。",
+                    flush=True,
+                )
+                region_markdown = "\n\n".join(
+                    contents[key] for key in sorted(contents)
+                )
             region_markdowns.append(region_markdown.strip())
         return "\n\n".join(text for text in region_markdowns if text).strip()
 

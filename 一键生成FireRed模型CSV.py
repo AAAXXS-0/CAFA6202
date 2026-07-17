@@ -193,7 +193,7 @@ def main() -> int:
         os.environ.get("FIRERED_LONG_MAX_NEW_TOKENS", "4096")
     )
     table_max_tokens = int(
-        os.environ.get("FIRERED_TABLE_MAX_NEW_TOKENS", "4096")
+        os.environ.get("FIRERED_TABLE_MAX_NEW_TOKENS", "8192")
     )
     print(
         "[FireRed] 单模型、单并行、顺序执行，"
