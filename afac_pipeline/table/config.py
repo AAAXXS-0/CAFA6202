@@ -44,6 +44,11 @@ class TableConfig:
     grid_line_min_ratio: float = 0.90
     grid_min_line_count: int = 5
     grid_black_line_ratio: float = 0.90
+    # 短表中同列数字“1”的竖笔画可能恰好超过 90%。竖线因此改用更严格的
+    # 中段覆盖率，并要求候选线明显深于左右邻域；横线仍沿用上面的 90%。
+    grid_black_column_line_ratio: float = 0.95
+    grid_black_column_endpoint_trim_ratio: float = 0.05
+    grid_black_column_min_contrast: float = 30.0
     grid_reliable_line_count: int = 5
     grid_min_cell_size: int = 18
     whitespace_blank_ratio: float = 0.01
@@ -60,7 +65,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v9-soft-grid-no-stretch"
+    pipeline_version: str = "table-v10-column-line-contrast"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -101,6 +106,14 @@ class TableConfig:
             raise ValueError("网格线数量和最小单元格尺寸配置不合法")
         if not 0 < self.grid_black_line_ratio <= 1:
             raise ValueError("grid_black_line_ratio 必须位于 (0, 1] 内")
+        if not 0 < self.grid_black_column_line_ratio <= 1:
+            raise ValueError("grid_black_column_line_ratio 必须位于 (0, 1] 内")
+        if not 0 <= self.grid_black_column_endpoint_trim_ratio < 0.5:
+            raise ValueError(
+                "grid_black_column_endpoint_trim_ratio 必须位于 [0, 0.5) 内"
+            )
+        if self.grid_black_column_min_contrast < 0:
+            raise ValueError("grid_black_column_min_contrast 不能小于 0")
         if self.grid_reliable_line_count < 1:
             raise ValueError("grid_reliable_line_count 至少为 1")
         if not 0 <= self.whitespace_blank_ratio < 1:

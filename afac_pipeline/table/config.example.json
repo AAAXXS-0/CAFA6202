@@ -23,6 +23,9 @@
   "grid_line_min_ratio": 0.90,
   "grid_min_line_count": 5,
   "grid_black_line_ratio": 0.90,
+  "grid_black_column_line_ratio": 0.95,
+  "grid_black_column_endpoint_trim_ratio": 0.05,
+  "grid_black_column_min_contrast": 30.0,
   "grid_reliable_line_count": 5,
   "grid_min_cell_size": 18,
   "whitespace_blank_ratio": 0.01,
@@ -37,5 +40,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v9-soft-grid-no-stretch"
+  "pipeline_version": "table-v10-column-line-contrast"
 }

@@ -21,6 +21,9 @@ class V6StructureTest(unittest.TestCase):
         )
         self.assertEqual(config.grid_white_threshold, 225)
         self.assertEqual(config.grid_black_line_ratio, 0.90)
+        self.assertEqual(config.grid_black_column_line_ratio, 0.95)
+        self.assertEqual(config.grid_black_column_endpoint_trim_ratio, 0.05)
+        self.assertEqual(config.grid_black_column_min_contrast, 30.0)
         self.assertEqual(config.grid_reliable_line_count, 5)
         self.assertEqual(config.whitespace_blank_ratio, 0.01)
 
@@ -33,6 +36,33 @@ class V6StructureTest(unittest.TestCase):
         lines = adaptive_line_segments(ink, envelope, axis=0, minimum_ratio=0.90)
 
         self.assertEqual([line.position for line in lines], [5])
+
+    def test_strict_column_rule_keeps_grid_line_and_rejects_aligned_ones(self) -> None:
+        gray = np.full((100, 40), 255, dtype=np.uint8)
+        # 真实表格线颜色深、左右为背景；上下各留 5 像素模拟包络误差。
+        gray[5:95, 10] = 170
+        # 同列数字“1”覆盖率也很高，但左右同属文字，局部对比明显更小。
+        gray[5:95, 20] = 205
+        gray[5:95, 17:20] = 218
+        gray[5:95, 21:24] = 218
+        ink = gray < 225
+        envelope = np.ones_like(ink)
+
+        loose = adaptive_line_segments(
+            ink, envelope, axis=1, minimum_ratio=0.90
+        )
+        strict = adaptive_line_segments(
+            ink,
+            envelope,
+            axis=1,
+            minimum_ratio=0.95,
+            grayscale=gray,
+            endpoint_trim_ratio=0.05,
+            minimum_contrast=30.0,
+        )
+
+        self.assertIn(20, [line.position for line in loose])
+        self.assertEqual([line.position for line in strict], [10])
 
     def test_each_direction_can_choose_black_line_or_whitespace_separately(self) -> None:
         image = Image.new("RGB", (600, 420), "white")

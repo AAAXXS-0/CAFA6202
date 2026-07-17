@@ -180,11 +180,18 @@ def adaptive_line_segments(
     axis: int,
     minimum_ratio: float = 0.90,
     minimum_span_ratio: float = 0.20,
+    *,
+    grayscale: np.ndarray | None = None,
+    endpoint_trim_ratio: float = 0.0,
+    minimum_contrast: float = 0.0,
 ) -> list[LineSegment]:
-    """只接受在完整表格跨度内黑像素覆盖率达到 90% 的候选线。"""
+    """按覆盖率找整线，并可用中段覆盖率和邻域对比排除数字竖笔画。"""
 
     data = black_ink if axis == 0 else black_ink.T
     envelope = envelope_mask if axis == 0 else envelope_mask.T
+    gray_data = None if grayscale is None else (
+        grayscale if axis == 0 else grayscale.T
+    )
     scores = np.zeros(len(data), dtype=np.float32)
     starts = np.zeros(len(data), dtype=np.int32)
     ends = np.zeros(len(data), dtype=np.int32)
@@ -198,10 +205,30 @@ def adaptive_line_segments(
             continue
         starts[index] = start
         ends[index] = end
-        if axis == 0:
-            scores[index] = float(black_ink[index, start:end].mean())
-        else:
-            scores[index] = float(black_ink[start:end, index].mean())
+        trim = min(
+            round((end - start) * endpoint_trim_ratio),
+            max(0, (end - start - 1) // 2),
+        )
+        measure_start = start + trim
+        measure_end = end - trim
+        scores[index] = float(data[index, measure_start:measure_end].mean())
+        if gray_data is not None and minimum_contrast > 0:
+            shoulder_indices = [
+                neighbor
+                for neighbor in (index - 3, index - 2, index + 2, index + 3)
+                if 0 <= neighbor < len(gray_data)
+            ]
+            if not shoulder_indices:
+                scores[index] = 0.0
+                continue
+            center_mean = float(
+                gray_data[index, measure_start:measure_end].mean()
+            )
+            shoulder_mean = float(
+                gray_data[shoulder_indices, measure_start:measure_end].mean()
+            )
+            if shoulder_mean - center_mean < minimum_contrast:
+                scores[index] = 0.0
 
     segments: list[LineSegment] = []
     for run_start, run_end in _runs(scores >= minimum_ratio):
@@ -247,7 +274,13 @@ def detect_v6_grid(
         ink, envelope, 0, config.grid_black_line_ratio
     )
     black_columns = adaptive_line_segments(
-        ink, envelope, 1, config.grid_black_line_ratio
+        ink,
+        envelope,
+        1,
+        config.grid_black_column_line_ratio,
+        grayscale=gray,
+        endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
+        minimum_contrast=config.grid_black_column_min_contrast,
     )
     white_rows, white_columns = _whitespace_centers(ink, config)
     reliable = config.grid_reliable_line_count
@@ -256,7 +289,11 @@ def detect_v6_grid(
     row_centers = [line.position for line in black_rows] if row_is_black else white_rows
     column_centers = [line.position for line in black_columns] if column_is_black else white_columns
     row_source = f"black-line-{config.grid_black_line_ratio:.2f}" if row_is_black else "white-band"
-    column_source = f"black-line-{config.grid_black_line_ratio:.2f}" if column_is_black else "white-band"
+    column_source = (
+        f"black-line-{config.grid_black_column_line_ratio:.2f}-contrast"
+        if column_is_black
+        else "white-band"
+    )
     diagnostics = V6GridDiagnostics(
         row_source,
         column_source,
