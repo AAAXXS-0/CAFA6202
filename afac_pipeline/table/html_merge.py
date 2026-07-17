@@ -250,7 +250,7 @@ def merge_logical_tiles(
                 "actual_columns": parsed.column_count,
             }
         )
-        if parsed.row_count != expected_rows or parsed.column_count != expected_columns:
+        if parsed.row_count != expected_rows or parsed.column_count > expected_columns:
             raise HtmlTableMergeError(
                 f"{plan.file_name} 行列数不符：期望 {expected_rows}×{expected_columns}，"
                 f"实际 {parsed.row_count}×{parsed.column_count}"

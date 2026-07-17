@@ -12,6 +12,7 @@ from afac_pipeline.common.firered_vl_client import (
     FireRedOCRClient,
     _strip_outer_markdown_fence,
     align_headings_to_manifest,
+    promote_numbered_bold_definitions,
 )
 
 
@@ -127,6 +128,8 @@ class FireRedClientTest(unittest.TestCase):
             self.assertEqual(load_counts, {"processor": 1, "model": 1})
             self.assertEqual(model.generate_calls, 2)
             self.assertEqual(model.max_new_tokens, [4321, 1234])
+            self.assertIn("table=654321px-4096tok", client.model)
+            self.assertTrue(client.table_cache_model().endswith("table-output=4321tok"))
             self.assertEqual(processor.image_processor.max_pixels, 300000)
             sent_prompt = processor.messages[0]["content"][1]["text"]
             self.assertEqual(sent_prompt, FIRERED_OFFICIAL_PROMPT)
@@ -153,6 +156,39 @@ class FireRedClientTest(unittest.TestCase):
         self.assertEqual(
             align_headings_to_manifest(markdown, pack),
             "## 任意一级文字\n\n### 任意二级文字\n\n正文",
+        )
+
+    def test_manifest_restores_matching_bold_headings(self) -> None:
+        pack = SimpleNamespace(
+            heading_hints=(
+                {"heading_id": "h2", "level": 2},
+                {"heading_id": "h3", "level": 3},
+            )
+        )
+        markdown = "**章节标题**\n\n正文\n\n**条目标题**\n\n条目正文"
+        self.assertEqual(
+            align_headings_to_manifest(markdown, pack),
+            "## 章节标题\n\n正文\n\n### 条目标题\n\n条目正文",
+        )
+
+    def test_legacy_consecutive_numbered_definitions_become_h4(self) -> None:
+        pack = SimpleNamespace(heading_hints=())
+        markdown = (
+            "**96. 第一项：**\n\n正文\n\n"
+            "**97. 第二项：**\n\n正文\n\n"
+            "**98. 第三项：**\n\n正文"
+        )
+        repaired = promote_numbered_bold_definitions(markdown, pack)
+        self.assertIn("#### 96. 第一项：", repaired)
+        self.assertIn("#### 98. 第三项：", repaired)
+
+    def test_wrapped_h1_is_joined(self) -> None:
+        pack = SimpleNamespace(heading_hints=())
+        self.assertEqual(
+            align_headings_to_manifest(
+                "# 产品名称\n# （2026版）条款\n\n正文", pack
+            ),
+            "# 产品名称 （2026版）条款\n\n正文",
         )
 
     def test_blank_image_skips_the_only_model(self) -> None:

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PIL import Image, ImageDraw
 from tempfile import TemporaryDirectory
 
@@ -45,7 +46,7 @@ from ..common.vlm_client import (
 )
 
 
-PROMPT_VERSION = "table-structured-html-v2"
+PROMPT_VERSION = "table-structured-html-v3-output-budget"
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -57,6 +58,20 @@ def _json_dump(path: Path, value: Any) -> None:
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _table_cache_model(client: FinixDocClient) -> str:
+    """允许本地模型只让图表参数进入图表缓存，不牵连长图缓存。"""
+
+    resolver = getattr(client, "table_cache_model", None)
+    return str(resolver()) if callable(resolver) else str(client.model)
+
+
+def _table_legacy_cache_models(client: FinixDocClient) -> tuple[str, ...]:
+    resolver = getattr(client, "table_legacy_cache_models", None)
+    if not callable(resolver):
+        return ()
+    return tuple(str(value) for value in resolver())
 
 
 def build_table_prompt(tile: TilePlan) -> str:
@@ -275,6 +290,77 @@ class TablePipeline:
             _json_dump(analysis_dir / f"region_{region_index:03d}_diagnostics.json", diagnostic_data)
         return grid
 
+    def _trim_empty_outer_rows(
+        self,
+        image_path: Path,
+        region: Box,
+        grid: GridStructure,
+    ) -> tuple[Box, GridStructure]:
+        """删除只含网格线的最外层空带；中间空行和带字边缘行不动。"""
+
+        boundaries = list(grid.row_boundaries)
+        if len(boundaries) <= 2:
+            return region, grid
+        with Image.open(image_path) as source:
+            gray = np.asarray(
+                source.convert("L").crop(
+                    (region.x1, region.y1, region.x2, region.y2)
+                ),
+                dtype=np.uint8,
+            )
+
+        def has_text(start: int, end: int) -> bool:
+            band = gray[start - region.y1 : end - region.y1]
+            if band.size == 0:
+                return False
+            ink = band < self.config.grid_white_threshold
+            # 去掉贯穿大半区域的横向/纵向网格线，只看短文字笔画。
+            ink[ink.mean(axis=1) > 0.65, :] = False
+            ink[:, ink.mean(axis=0) > 0.65] = False
+            return int(np.count_nonzero(ink)) > max(
+                8, round(ink.size * 0.0005)
+            )
+
+        changed = False
+        # 只删一层，并要求相邻内层确实有文字。纯网格、整表空白或连续
+        # 空行都保持原样，避免为了“清边”把合法结构逐层吃掉。
+        if (
+            len(boundaries) > 3
+            and not has_text(boundaries[0], boundaries[1])
+            and has_text(boundaries[1], boundaries[2])
+        ):
+            boundaries.pop(0)
+            changed = True
+        if (
+            len(boundaries) > 3
+            and not has_text(boundaries[-2], boundaries[-1])
+            and has_text(boundaries[-3], boundaries[-2])
+        ):
+            boundaries.pop()
+            changed = True
+        if not changed:
+            return region, grid
+        trimmed = Box(region.x1, boundaries[0], region.x2, boundaries[-1])
+        return trimmed, GridStructure(
+            f"{grid.source}:trim-empty-edge",
+            tuple(boundaries),
+            grid.column_boundaries,
+        )
+
+
+    def _fit_tile_output_aspect(self, plan: TilePlan) -> TilePlan:
+        """只纵向拉伸极扁切片，让模型能分清多行；逻辑坐标保持不变。"""
+
+        minimum_height = round(
+            plan.output_width / self.config.max_vlm_aspect_ratio
+        )
+        if plan.output_height >= minimum_height:
+            return plan
+        return replace(
+            plan,
+            output_height=min(self.config.max_vlm_side, minimum_height),
+        )
+
     def _save_tile(
         self, image_path: Path, output_path: Path, plan: TilePlan,
         row_boundaries: tuple[int, ...], column_boundaries: tuple[int, ...],
@@ -283,6 +369,14 @@ class TablePipeline:
 
         if plan.header_context_rows == 0 and plan.stub_context_columns == 0:
             self.backend.save_crop(image_path, plan.source_box, output_path, plan.scale)
+            with Image.open(output_path) as source:
+                tile = source.convert("RGB").copy()
+            if tile.size != (plan.output_width, plan.output_height):
+                tile = tile.resize(
+                    (plan.output_width, plan.output_height),
+                    Image.Resampling.LANCZOS,
+                )
+                tile.save(output_path, format="PNG", optimize=True)
             return
         with TemporaryDirectory(dir=output_path.parent) as temporary:
             temporary_dir = Path(temporary)
@@ -307,8 +401,14 @@ class TablePipeline:
             if top_height and left_width:
                 corner_box = Box(column_boundaries[0], row_boundaries[0], column_boundaries[plan.stub_context_columns], row_boundaries[plan.header_context_rows])
                 canvas.paste(crop("corner", corner_box), (0, 0))
+            if canvas.size != (plan.output_width, plan.output_height):
+                canvas = canvas.resize(
+                    (plan.output_width, plan.output_height),
+                    Image.Resampling.LANCZOS,
+                )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             canvas.save(output_path, format="PNG", optimize=True)
+
 
     @staticmethod
     def _preview_box(box: Box, preview: Image.Image, meta: ImageMeta) -> Box:
@@ -432,13 +532,18 @@ class TablePipeline:
 
         regions: list[PreparedRegion] = []
         for region_index, item in enumerate(detected):
-            grid = self._analyze_grid(image_path, item.box, region_index, image_dir)
+            region_box = item.box
+            grid = self._analyze_grid(image_path, region_box, region_index, image_dir)
             plans = []
             if grid.available:
+                region_box, grid = self._trim_empty_outer_rows(
+                    image_path, region_box, grid
+                )
                 plans = plan_grid_tiles(
-                    item.box, region_index, grid.row_boundaries, grid.column_boundaries,
+                    region_box, region_index, grid.row_boundaries, grid.column_boundaries,
                     self.config.max_vlm_side, self.config.single_tile_min_scale,
                     self.config.repeat_header_rows, self.config.repeat_stub_columns,
+                    self.config.max_logical_cells_per_tile,
                 )
             if not plans:
                 # 保留“检测到了边界但存在超大单元格”的原因，避免清单把它
@@ -452,9 +557,10 @@ class TablePipeline:
                     fallback_source, grid.row_boundaries, grid.column_boundaries
                 )
                 plans = plan_region_tiles(
-                    item.box, region_index, self.config.max_vlm_side,
+                    region_box, region_index, self.config.max_vlm_side,
                     self.config.tile_overlap, self.config.single_tile_min_scale,
                 )
+            plans = [self._fit_tile_output_aspect(plan) for plan in plans]
             for plan in plans:
                 self._save_tile(
                     image_path, tiles_dir / plan.file_name, plan,
@@ -463,7 +569,7 @@ class TablePipeline:
             regions.append(
                 PreparedRegion(
                     index=region_index,
-                    box=item.box,
+                    box=region_box,
                     detector_source=item.source,
                     tiles=plans,
                     grid_source=grid.source,
@@ -558,6 +664,7 @@ class TablePipeline:
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         region_markdowns: list[str] = []
+        cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
         completed_tiles = 0
         for region in image_manifest["regions"]:
@@ -574,9 +681,48 @@ class TablePipeline:
                     lambda: build_table_prompt(tile),
                 )
                 image_bytes = tile_path.read_bytes()
-                cache_key = self.cache.tile_key(image_bytes, prompt, client.model)
+                cache_key = self.cache.tile_key(image_bytes, prompt, cache_model)
                 markdown = self.cache.get_tile(cache_key)
                 source = "缓存"
+                if markdown is None:
+                    # 参数升级后尝试迁移旧成功缓存；截断或行列不符的响应
+                    # 不迁移，仍由新参数重新识别。
+                    for legacy_model in _table_legacy_cache_models(client):
+                        legacy_key = self.cache.tile_key(
+                            image_bytes, prompt, legacy_model
+                        )
+                        candidate = self.cache.get_tile(legacy_key)
+                        if candidate is None:
+                            continue
+                        if tile.tiling_mode == "logical_grid":
+                            try:
+                                _, actual = normalize_table_response(candidate)
+                            except HtmlTableMergeError:
+                                continue
+                            expected_rows = tile.header_context_rows + (
+                                tile.logical_row_end - tile.logical_row_start
+                            )
+                            expected_columns = tile.stub_context_columns + (
+                                tile.logical_column_end - tile.logical_column_start
+                            )
+                            if (
+                                actual["rows"] != expected_rows
+                                or actual["columns"] > expected_columns
+                            ):
+                                continue
+                        markdown = candidate
+                        source = "兼容缓存"
+                        self.cache.put_tile(
+                            cache_key,
+                            markdown,
+                            {
+                                "tile": tile.to_dict(),
+                                "model": cache_model,
+                                "migrated_from": legacy_model,
+                                "prompt_version": PROMPT_VERSION,
+                            },
+                        )
+                        break
                 if markdown is None:
                     source = "API"
                     print(
@@ -590,7 +736,7 @@ class TablePipeline:
                         markdown,
                         {
                             "tile": tile.to_dict(),
-                            "model": client.model,
+                            "model": cache_model,
                             "prompt_version": PROMPT_VERSION,
                         },
                     )
@@ -665,11 +811,12 @@ class TablePipeline:
         max_workers: int = 1,
     ) -> dict[str, str]:
         dataset_manifest = _load_json(Path(dataset_manifest_path))
+        cache_model = _table_cache_model(client)
         recognition_digest = hashlib.sha256(
             (
                 dataset_manifest["config_digest"]
                 + "\0"
-                + client.model
+                + cache_model
                 + "\0"
                 + PROMPT_VERSION
             ).encode("utf-8")
@@ -695,7 +842,7 @@ class TablePipeline:
                     cached,
                     {
                         "canonical_file_name": canonical_name,
-                        "model": client.model,
+                        "model": cache_model,
                         "prompt_version": PROMPT_VERSION,
                     },
                 )

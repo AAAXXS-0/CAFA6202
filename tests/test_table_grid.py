@@ -57,6 +57,20 @@ class TableGridTest(unittest.TestCase):
         self.assertTrue(all(plan.output_width <= 3000 for plan in plans))
         self.assertTrue(all(plan.output_height <= 3000 for plan in plans))
 
+    def test_output_budget_splits_wide_table_only_by_rows(self) -> None:
+        rows = tuple(range(0, 1001, 100))
+        columns = tuple(range(0, 4001, 100))
+        plans = plan_grid_tiles(
+            Box(0, 0, 4000, 1000), 0, rows, columns,
+            max_side=3900, single_tile_min_scale=0.65,
+            repeat_header_rows=1, repeat_stub_columns=1,
+            max_logical_cells_per_tile=320,
+        )
+        self.assertGreater(len(plans), 1)
+        self.assertTrue(all(plan.column_count == 1 for plan in plans))
+        self.assertTrue(all(plan.logical_column_end == 40 for plan in plans))
+        self.assertTrue(all(plan.output_width <= 3900 for plan in plans))
+
     def test_borderless_table_uses_whitespace_only_after_line_detection_fails(self) -> None:
         image = Image.new("RGB", (600, 420), "white")
         draw = ImageDraw.Draw(image)

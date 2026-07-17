@@ -67,35 +67,92 @@ def _strip_outer_markdown_fence(text: str) -> str:
     return match.group(1).strip() if match else value
 
 
+def _join_wrapped_h1(lines: list[str]) -> str:
+    """把原图换行导致的连续 H1 合回一个文档标题。"""
+
+    output: list[str] = []
+    for line in lines:
+        if output and output[-1].startswith("# ") and line.startswith("# "):
+            output[-1] = output[-1].rstrip() + " " + line[2:].strip()
+        else:
+            output.append(line)
+    return "\n".join(output).strip()
+
+
+def promote_numbered_bold_definitions(markdown: str, pack: Any) -> str:
+    """无语义提示时，把连续编号的整行粗体定义项保守恢复为 H4。"""
+
+    if getattr(pack, "heading_hints", ()):
+        return markdown.strip()
+    lines = markdown.strip().splitlines()
+    candidates: list[tuple[int, int, str]] = []
+    for index, line in enumerate(lines):
+        bold = re.fullmatch(r"\s*\*\*(.+)\*\*\s*", line)
+        if not bold:
+            continue
+        text = bold.group(1).strip()
+        numbered = re.match(r"^(\d{1,4})[.．、]\s*(.+)$", text)
+        if numbered and text.rstrip().endswith(("：", ":")):
+            candidates.append((index, int(numbered.group(1)), text))
+    if len(candidates) < 3:
+        return markdown.strip()
+    numbers = [number for _, number, _ in candidates]
+    consecutive = sum(
+        right == left + 1 for left, right in zip(numbers, numbers[1:])
+    )
+    if consecutive < len(numbers) - 2:
+        return markdown.strip()
+    replacements = {index: f"#### {text}" for index, _, text in candidates}
+    return "\n".join(
+        replacements.get(index, line) for index, line in enumerate(lines)
+    ).strip()
+
+
 def align_headings_to_manifest(markdown: str, pack: Any) -> str:
-    """按 manifest 已知的最高层级整体平移标题，不根据标题文字猜层级。"""
+    """用 manifest 校准标题，并修复 FireRed 输出的整行粗体标题。"""
 
     expected_levels = [
         int(item.get("level", 0))
         for item in getattr(pack, "heading_hints", ())
         if 1 <= int(item.get("level", 0)) <= 6
     ]
-    observed_levels = [
-        len(match.group(1))
-        for line in markdown.splitlines()
-        if (match := re.match(r"^(#{1,6})\s+", line))
+    lines = markdown.strip().splitlines()
+    heading_rows = [
+        index for index, line in enumerate(lines)
+        if re.match(r"^(#{1,6})\s+", line)
     ]
-    if not expected_levels or not observed_levels:
-        return markdown.strip()
+    bold_rows = [
+        (index, match.group(1).strip())
+        for index, line in enumerate(lines)
+        if (match := re.fullmatch(r"\s*\*\*(.+)\*\*\s*", line))
+    ]
 
+    # 只有候选数量完全一致才提升粗体，避免把普通强调文字误当标题。
+    if expected_levels and not heading_rows and len(bold_rows) == len(expected_levels):
+        for level, (index, text) in zip(expected_levels, bold_rows):
+            lines[index] = f"{'#' * level} {text}"
+        return _join_wrapped_h1(lines)
+
+    if not expected_levels or not heading_rows:
+        return _join_wrapped_h1(lines)
+
+    if len(expected_levels) == len(heading_rows):
+        for level, index in zip(expected_levels, heading_rows):
+            text = re.sub(r"^#{1,6}\s+", "", lines[index])
+            lines[index] = f"{'#' * level} {text}"
+        return _join_wrapped_h1(lines)
+
+    observed_levels = [
+        len(re.match(r"^(#{1,6})", lines[index]).group(1))
+        for index in heading_rows
+    ]
     shift = min(expected_levels) - min(observed_levels)
-    if shift == 0:
-        return markdown.strip()
-
-    output: list[str] = []
-    for line in markdown.splitlines():
-        match = re.match(r"^(#{1,6})(\s+.*)$", line)
-        if not match:
-            output.append(line)
-            continue
-        level = min(6, max(1, len(match.group(1)) + shift))
-        output.append(f"{'#' * level}{match.group(2)}")
-    return "\n".join(output).strip()
+    if shift:
+        for index in heading_rows:
+            match = re.match(r"^(#{1,6})(\s+.*)$", lines[index])
+            level = min(6, max(1, len(match.group(1)) + shift))
+            lines[index] = f"{'#' * level}{match.group(2)}"
+    return _join_wrapped_h1(lines)
 
 
 class FireRedOCRClient:
@@ -112,7 +169,7 @@ class FireRedOCRClient:
         max_pixels: int = 1024 * 28 * 28,
         table_max_pixels: int = 2048 * 28 * 28,
         max_new_tokens: int = 4096,
-        table_max_new_tokens: int = 4096,
+        table_max_new_tokens: int = 8192,
         processor_loader: Callable[..., Any] | None = None,
         model_loader: Callable[..., Any] | None = None,
         torch_module: Any | None = None,
@@ -165,10 +222,15 @@ class FireRedOCRClient:
         self.table_max_pixels = table_max_pixels
         self.max_new_tokens = max_new_tokens
         self.table_max_new_tokens = table_max_new_tokens
+        # self.model 保持旧长图缓存身份；图表另用独立缓存身份，
+        # 避免只调整图表输出上限，却让已完成的长图缓存全部失效。
         self.model = (
             f"{model_name}@torch-bf16-single;"
             f"long={min_pixels}-{max_pixels}px-{max_new_tokens}tok;"
-            f"table={table_max_pixels}px-{table_max_new_tokens}tok"
+            f"table={table_max_pixels}px-4096tok"
+        )
+        self.table_model = (
+            f"{self.model};table-output={table_max_new_tokens}tok"
         )
         self._lock = Lock()
 
@@ -321,7 +383,7 @@ class FireRedOCRClient:
 
         peak_gib = float(self._torch.cuda.max_memory_allocated()) / 1024**3
         debug = {
-            "model": self.model,
+            "model": self.table_model if is_table else self.model,
             "source_image": str(image_path),
             "source_width": source_size[0],
             "source_height": source_size[1],
@@ -349,7 +411,19 @@ class FireRedOCRClient:
     def postprocess_long_pack(markdown: str, pack: Any) -> str:
         """让块内相对标题从 manifest 指定的 H1/H2/H3 起点开始。"""
 
-        return align_headings_to_manifest(markdown, pack)
+        repaired = promote_numbered_bold_definitions(markdown, pack)
+        return align_headings_to_manifest(repaired, pack)
+
+    def table_cache_model(self) -> str:
+        """图表缓存单独记录输出 token 上限，不影响长图缓存。"""
+
+        return self.table_model
+
+
+    def table_legacy_cache_models(self) -> tuple[str, ...]:
+        """旧图表响应只有完整可解析时才由流水线迁移复用。"""
+
+        return (self.model,)
 
     def long_pack_cache_model(self, image_path: str | Path) -> str:
         """极端长图把临时切割版本写入外层 SQLite 缓存键。"""

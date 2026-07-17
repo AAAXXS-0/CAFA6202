@@ -49,7 +49,7 @@ from ..common.vlm_client import (
 )
 
 
-LONG_PROMPT_VERSION = "long-markdown-v6-local-heading-structure"
+LONG_PROMPT_VERSION = "long-markdown-v7-firered-heading-repair"
 
 
 def _dump_json(path: Path, value: Any) -> None:
