@@ -45,6 +45,31 @@ class FinixDocPermanentError(RuntimeError):
     """凭据、字段或业务响应错误，原样重试通常不会恢复。"""
 
 
+class FinixDocEmptyContentError(FinixDocTemporaryError):
+    """接口正常返回，但模型正文为空。"""
+
+
+_TEMPORARY_MESSAGE_MARKERS = (
+    "识别失败",
+    "请求过载",
+    "请求超载",
+    "服务器繁忙",
+    "系统繁忙",
+    "服务繁忙",
+    "模型繁忙",
+    "稍后重试",
+    "too many requests",
+    "overload",
+    "temporarily unavailable",
+)
+
+
+def _is_temporary_service_message(message: object) -> bool:
+    normalized = str(message).strip().lower()
+    return any(marker in normalized for marker in _TEMPORARY_MESSAGE_MARKERS)
+
+
+
 def select_request_prompt(
     protocol: str,
     prompt_factory: Callable[[], str],
@@ -80,7 +105,11 @@ def _chat_content(payload: dict[str, Any]) -> str:
     text = _strip_markdown_fence(str(content))
     if not text:
         # 空文本通常是上游模型暂时没有生成结果，并非图片或凭据永久错误。
-        raise FinixDocTemporaryError("FinixDoc-VL 返回了空内容")
+        raise FinixDocEmptyContentError("FinixDoc-VL 返回了空内容")
+    if len(text) <= 240 and _is_temporary_service_message(text):
+        raise FinixDocTemporaryError(
+            f"FinixDoc-VL 返回临时故障文本：{text}"
+        )
     return text
 
 
@@ -89,10 +118,12 @@ def parse_official_response(payload: dict[str, Any]) -> str:
 
     if payload.get("success") is not True:
         message = payload.get("message") or "接口返回 success=false"
-        # 官方网关会把上游模型的临时空响应包装成 success=false。
-        # 这种情况换账号并稍后重试可以恢复，不能与无权限等永久错误混为一谈。
         if "content is empty" in str(message).lower():
-            raise FinixDocTemporaryError(f"FinixDoc-VL 临时空响应：{message}")
+            raise FinixDocEmptyContentError(
+                f"FinixDoc-VL 临时空响应：{message}"
+            )
+        if _is_temporary_service_message(message):
+            raise FinixDocTemporaryError(f"FinixDoc-VL 临时故障：{message}")
         raise FinixDocPermanentError(f"FinixDoc-VL 业务请求失败：{message}")
 
     outer_result = payload.get("result")
@@ -284,6 +315,8 @@ class FinixDocClient:
         prompt: str,
         *,
         request_label: str | None = None,
+        empty_retry_limit: int | None = None,
+        return_empty_after_limit: bool = False,
     ) -> str:
         """识别图片，并在临时错误后轮换白名单账号重试。
 
@@ -291,6 +324,14 @@ class FinixDocClient:
         第 n 次重试前等待 (8+n-1)² 秒：64、81、100……484 秒。
         每次重试继续轮换白名单账号；成功响应由上层立即写入 SQLite 缓存。
         """
+
+        if empty_retry_limit is not None and not (
+            0 <= empty_retry_limit <= self.max_retries
+        ):
+            raise ValueError("空响应重试次数必须位于 0 和 max_retries 之间")
+        if return_empty_after_limit and empty_retry_limit is None:
+            raise ValueError("返回空结果兜底必须同时设置空响应重试次数")
+
 
         last_error: Exception | None = None
         image_path = Path(image_path)
@@ -302,6 +343,7 @@ class FinixDocClient:
             initial_user_offset = self._request_sequence
             self._request_sequence += 1
         retry_number = 0
+        empty_retry_number = 0
         while True:
             active_user = attempt_users[
                 (initial_user_offset + retry_number) % len(attempt_users)
@@ -322,6 +364,21 @@ class FinixDocClient:
                     status = error.response.status_code
                     if 400 <= status < 500 and status != 429:
                         break
+                is_empty = isinstance(error, FinixDocEmptyContentError)
+                if (
+                    is_empty
+                    and empty_retry_limit is not None
+                ):
+                    if empty_retry_number >= empty_retry_limit:
+                        if return_empty_after_limit:
+                            print(
+                                f"[FinixDoc-VL 空响应兜底] {display_name}："
+                                f"退让 {empty_retry_limit} 次后仍为空，交由上层补空。",
+                                flush=True,
+                            )
+                            return ""
+                        break
+                    empty_retry_number += 1
                 if retry_number >= self.max_retries:
                     break
                 retry_number += 1
@@ -331,8 +388,14 @@ class FinixDocClient:
                 ]
                 current_user_text = active_user or "无 userId"
                 next_user_text = next_user or "无 userId"
+                if is_empty and empty_retry_limit is not None:
+                    progress = (
+                        f"空响应退让 {empty_retry_number}/{empty_retry_limit}"
+                    )
+                else:
+                    progress = f"重试 {retry_number}/{self.max_retries}"
                 print(
-                    f"[FinixDoc-VL 重试 {retry_number}/{self.max_retries}] "
+                    f"[FinixDoc-VL {progress}] "
                     f"{display_name}：账号 {current_user_text} 请求失败：{error}；"
                     f"{delay:.0f} 秒后改用 {next_user_text}",
                     flush=True,

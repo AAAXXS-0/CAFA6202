@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 from tempfile import TemporaryDirectory
 
 from ..common.cache import ResultCache
+from ..common.recognition_errors import IncompleteImageRecognitionError
 from .config import TableConfig
 from .步骤003_区域检测器入口 import (
     InkTableDetector,
@@ -680,6 +681,7 @@ class TablePipeline:
             image_info.get("file_name") or Path(image_info["path"]).name
         )
         region_markdowns: list[str] = []
+        tile_failures: list[dict[str, Any]] = []
         cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
         completed_tiles = 0
@@ -813,6 +815,8 @@ class TablePipeline:
                                     tile_path,
                                     prompt,
                                     request_label=request_label,
+                                    empty_retry_limit=min(3, client.max_retries),
+                                    return_empty_after_limit=True,
                                 )
                             else:
                                 markdown = client.recognize(tile_path, prompt)
@@ -825,12 +829,41 @@ class TablePipeline:
                                 empty_reason = "model-empty-markdown"
                                 source = "模型空响应，按预处理补空表"
                             else:
-                                raise
+                                failure = {
+                                    "source_image": image_name,
+                                    "region_index": region["index"],
+                                    "tile_file_name": tile.file_name,
+                                    "error_type": type(error).__name__,
+                                    "error": str(error),
+                                }
+                                tile_failures.append(failure)
+                                completed_tiles += 1
+                                print(
+                                    f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
+                                    f"{request_label}：{error}；继续此图下一块。",
+                                    flush=True,
+                                )
+                                continue
                         if not markdown.strip():
                             if tile.tiling_mode != "logical_grid":
-                                raise RuntimeError(
-                                    "模型返回了空结果，且该切片没有可靠的预处理行列数"
+                                message = (
+                                    "模型返回空结果，且切片没有可靠的预处理行列数"
                                 )
+                                failure = {
+                                    "source_image": image_name,
+                                    "region_index": region["index"],
+                                    "tile_file_name": tile.file_name,
+                                    "error_type": "UnrecoverableEmptyTile",
+                                    "error": message,
+                                }
+                                tile_failures.append(failure)
+                                completed_tiles += 1
+                                print(
+                                    f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
+                                    f"{request_label}：{message}；继续此图下一块。",
+                                    flush=True,
+                                )
+                                continue
                             markdown = _empty_tile_html(tile)
                             empty_reason = "model-empty-markdown"
                             source = "模型空响应，按预处理补空表"
@@ -855,6 +888,13 @@ class TablePipeline:
                 )
                 contents[tile_id] = markdown
 
+            if len(contents) != len(plans):
+                print(
+                    f"[图表暂缓合并] 原图 {image_name} / "
+                    f"区域 {region['index'] + 1}：存在失败切块，继续下一区域。",
+                    flush=True,
+                )
+                continue
             try:
                 if plans and plans[0].tiling_mode == "logical_grid":
                     if len(contents) == 1:
@@ -938,6 +978,23 @@ class TablePipeline:
                     contents[key] for key in sorted(contents)
                 )
             region_markdowns.append(region_markdown.strip())
+        part_failure_path = manifest_path.parent / "recognition_failures.json"
+        _json_dump(
+            part_failure_path,
+            {
+                "status": "incomplete" if tile_failures else "ok",
+                "source_image": image_name,
+                "failure_count": len(tile_failures),
+                "failed_parts": tile_failures,
+            },
+        )
+        if tile_failures:
+            raise IncompleteImageRecognitionError(
+                f"原图 {image_name} 有 {len(tile_failures)} 个切块失败；"
+                f"详情：{part_failure_path}",
+                tile_failures,
+            )
+
         return "\n\n".join(text for text in region_markdowns if text).strip()
 
     def recognize_dataset(
@@ -1006,6 +1063,8 @@ class TablePipeline:
                     "error_type": type(error).__name__,
                     "error": str(error),
                 }
+                if isinstance(error, IncompleteImageRecognitionError):
+                    failure["failed_parts"] = error.failed_parts
                 print(
                     f"[图表失败] 原图 {canonical_name}：{error}；"
                     "未写整图缓存，继续处理其他图片。",

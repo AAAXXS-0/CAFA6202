@@ -14,6 +14,7 @@ from typing import Any
 from ..common.cache import ResultCache
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
+from ..common.recognition_errors import IncompleteImageRecognitionError
 from .config import LongConfig
 from .步骤003_滑窗与YOLO检测 import (
     GeneralYoloDetector,
@@ -303,10 +304,30 @@ class LongPipeline:
             image_info.get("file_name") or Path(image_info["path"]).name
         )
         current = ""
+        pack_failures: list[dict[str, Any]] = []
         seen_heading_text: dict[str, str] = {}
         response_dir = manifest_path.parent / "responses"
         response_dir.mkdir(parents=True, exist_ok=True)
         raw_packs = image_manifest["request_packs"]
+
+        def request_pack(
+            crop_path: Path,
+            prompt: str,
+            pack: RecognitionPack,
+            request_label: str,
+        ) -> str:
+            recognize_long_pack = getattr(client, "recognize_long_pack", None)
+            if callable(recognize_long_pack):
+                return recognize_long_pack(
+                    crop_path, prompt, pack, image_manifest,
+                    self.config.semantic_context_gap,
+                )
+            if isinstance(client, FinixDocClient):
+                return client.recognize(
+                    crop_path, prompt, request_label=request_label,
+                )
+            return client.recognize(crop_path, prompt)
+
         for index, raw_pack in enumerate(raw_packs, start=1):
             pack = RecognitionPack.from_dict(raw_pack)
             crop_path = manifest_path.parent / "vlm_requests" / pack.file_name
@@ -334,24 +355,27 @@ class LongPipeline:
                     f"{request_label}：请求 API",
                     flush=True,
                 )
-                recognize_long_pack = getattr(client, "recognize_long_pack", None)
-                if callable(recognize_long_pack):
-                    markdown = recognize_long_pack(
+                try:
+                    markdown = request_pack(
                         crop_path,
                         prompt,
                         pack,
-                        image_manifest,
-                        self.config.semantic_context_gap,
+                        request_label,
                     )
-                else:
-                    if isinstance(client, FinixDocClient):
-                        markdown = client.recognize(
-                            crop_path,
-                            prompt,
-                            request_label=request_label,
-                        )
-                    else:
-                        markdown = client.recognize(crop_path, prompt)
+                except RuntimeError as error:
+                    failure = {
+                        "source_image": image_name,
+                        "pack_file_name": pack.file_name,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                    pack_failures.append(failure)
+                    print(
+                        f"[长图切块失败 {index:02d}/{len(raw_packs):02d}] "
+                        f"{request_label}：{error}；继续此图下一块。",
+                        flush=True,
+                    )
+                    continue
                 self.cache.put_tile(
                     cache_key,
                     markdown,
@@ -386,6 +410,23 @@ class LongPipeline:
                 current = merge_markdown_overlap(current, cleaned)
             else:
                 current = current.rstrip() + "\n\n" + cleaned.lstrip()
+        part_failure_path = manifest_path.parent / "recognition_failures.json"
+        _dump_json(
+            part_failure_path,
+            {
+                "status": "incomplete" if pack_failures else "ok",
+                "source_image": image_name,
+                "failure_count": len(pack_failures),
+                "failed_parts": pack_failures,
+            },
+        )
+        if pack_failures:
+            raise IncompleteImageRecognitionError(
+                f"原图 {image_name} 有 {len(pack_failures)} 个切块失败；"
+                f"详情：{part_failure_path}",
+                pack_failures,
+            )
+
         return normalize_markdown_heading_levels(current.strip())
 
     def recognize_dataset(
@@ -452,6 +493,8 @@ class LongPipeline:
                     "error_type": type(error).__name__,
                     "error": str(error),
                 }
+                if isinstance(error, IncompleteImageRecognitionError):
+                    failure["failed_parts"] = error.failed_parts
                 print(
                     f"[长图失败] 原图 {canonical_name}：{error}；"
                     "未写整图缓存，继续处理其他图片。",
