@@ -35,7 +35,7 @@
   "whitespace_vertical_dilate_ratio": 0.004,
   "repeat_header_rows": 0,
   "repeat_stub_columns": 0,
-  "max_logical_cells_per_tile": 560,
+  "max_logical_cells_per_tile": 320,
   "projection_threshold": 225,
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,

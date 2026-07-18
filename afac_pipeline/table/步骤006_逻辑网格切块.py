@@ -44,7 +44,7 @@ def plan_grid_tiles(
     single_tile_min_scale: float,
     repeat_header_rows: int,
     repeat_stub_columns: int,
-    max_logical_cells_per_tile: int = 560,
+    max_logical_cells_per_tile: int = 320,
 ) -> list[TilePlan]:
     """优先整表缩放；必须切分时只在完整的逻辑行列边界落刀。"""
 

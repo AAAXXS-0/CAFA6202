@@ -60,7 +60,9 @@ class TableConfig:
     repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
     # 图片尺寸能装下，不代表几千个单元格也能一次写完。
-    max_logical_cells_per_tile: int = 560
+    # FireRed 实测 552 格会撞到 8192 token 上限，HTML 在半行中截断；
+    # 320 格可完整输出，又不会像 160 格那样几乎翻倍切片数。
+    max_logical_cells_per_tile: int = 320
     projection_threshold: int = 225
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
