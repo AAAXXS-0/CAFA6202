@@ -200,6 +200,17 @@ def _render(
     return "\n".join(parts)
 
 
+def render_empty_table(row_count: int, column_count: int) -> str:
+    """按预处理识别到的行列数生成一张全空 HTML 表。
+
+    这不是让模型猜测内容，而是保留预处理已经确定的表格形状。
+    它主要用于“只有网格线、每个格子都没有文字”的切片。
+    """
+    if row_count <= 0 or column_count <= 0:
+        raise ValueError("空表的行数和列数必须大于 0")
+    return _render([], row_count, column_count)
+
+
 def normalize_table_response(response: str) -> tuple[str, dict[str, int]]:
     parsed = parse_table_response(response)
     return (

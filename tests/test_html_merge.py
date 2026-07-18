@@ -5,6 +5,7 @@ from afac_pipeline.table.步骤009_HTML表格软对齐 import (
     merge_logical_tiles,
     normalize_table_response,
     normalize_table_response_soft,
+    render_empty_table,
 )
 
 
@@ -65,6 +66,11 @@ class HtmlMergeTest(unittest.TestCase):
             [[True], [False], [True]],
         )
         self.assertEqual(html.count("<tr>"), 3)
+
+    def test_render_empty_table_preserves_preprocessed_shape(self) -> None:
+        html = render_empty_table(2, 3)
+        self.assertEqual(html.count("<tr>"), 2)
+        self.assertEqual(html.count("<td></td>"), 6)
 
 if __name__ == "__main__":
     unittest.main()

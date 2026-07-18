@@ -32,6 +32,7 @@ from .步骤009_HTML表格软对齐 import (
     merge_logical_tiles,
     normalize_table_response,
     normalize_table_response_soft,
+    render_empty_table,
 )
 from .步骤001_墨水密度定位 import density_visualization
 from .步骤008_Markdown表格合并 import MarkdownMergeError, merge_markdown_grid
@@ -51,7 +52,7 @@ from ..common.vlm_client import (
 )
 
 
-PROMPT_VERSION = "table-structured-html-v3-output-budget"
+PROMPT_VERSION = "table-structured-html-v4-empty-fallback"
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -111,6 +112,37 @@ def build_table_prompt(tile: TilePlan) -> str:
 6. 若边缘出现与相邻切片重复的行列，仍按图片如实输出，程序会根据重叠内容去重。
 
 直接输出 Markdown："""
+
+
+def _logical_tile_shape(tile: TilePlan) -> tuple[int, int]:
+    """返回逻辑网格切片里实际可见的行数和列数。"""
+
+    rows = tile.header_context_rows + tile.logical_row_end - tile.logical_row_start
+    columns = (
+        tile.stub_context_columns
+        + tile.logical_column_end
+        - tile.logical_column_start
+    )
+    return rows, columns
+
+
+def _mask_has_no_text(ink_mask: list[list[bool]] | None) -> bool:
+    """判断预处理是否已确认所有逻辑格内都没有文字。
+
+    ``None`` 表示没有可靠的逻辑网格信息，不能擅自当作空表。
+    """
+
+    return ink_mask is not None and bool(ink_mask) and all(
+        not has_text for row in ink_mask for has_text in row
+    )
+
+
+def _empty_tile_html(tile: TilePlan) -> str:
+    """根据逻辑切片的预处理行列数生成全空表。"""
+
+    if tile.tiling_mode != "logical_grid":
+        raise ValueError("只有逻辑网格切片才能生成预处理全空表")
+    return render_empty_table(*_logical_tile_shape(tile))
 
 
 class TablePipeline:
@@ -669,6 +701,7 @@ class TablePipeline:
             response_dir.mkdir(parents=True, exist_ok=True)
             for raw_tile in region["tiles"]:
                 tile = self._tile_from_dict(raw_tile)
+                tile_id = (tile.row_index, tile.column_index)
                 tile_path = manifest_path.parent / "tiles" / tile.file_name
                 # 官方 multipart 只上传图片和三个文本字段，不生成、不发送 prompt。
                 prompt = select_request_prompt(
@@ -677,64 +710,132 @@ class TablePipeline:
                 )
                 image_bytes = tile_path.read_bytes()
                 cache_key = self.cache.tile_key(image_bytes, prompt, cache_model)
-                markdown = self.cache.get_tile(cache_key)
-                source = "缓存"
-                if markdown is None:
-                    # 参数升级后尝试迁移旧成功缓存。这里只检查响应能否解析；
-                    # 行列差异由后面的墨迹软对齐处理并写入 warning，避免把
-                    # 只是省略空行空列的结果再次送进模型。
-                    for legacy_model in _table_legacy_cache_models(client):
-                        legacy_key = self.cache.tile_key(
-                            image_bytes, prompt, legacy_model
-                        )
-                        candidate = self.cache.get_tile(legacy_key)
-                        if candidate is None:
-                            continue
-                        if tile.tiling_mode == "logical_grid":
-                            try:
-                                normalize_table_response(candidate)
-                            except HtmlTableMergeError:
-                                continue
-                        markdown = candidate
-                        source = "兼容缓存"
-                        self.cache.put_tile(
-                            cache_key,
-                            markdown,
-                            {
-                                "tile": tile.to_dict(),
-                                "model": cache_model,
-                                "migrated_from": legacy_model,
-                                "prompt_version": PROMPT_VERSION,
-                            },
-                        )
-                        break
-                if markdown is None:
-                    source = "API"
-                    print(
-                        f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
-                        f"{tile.file_name}：请求 API",
-                        flush=True,
-                    )
-                    markdown = client.recognize(tile_path, prompt)
+                base_metadata = {
+                    "tile": tile.to_dict(),
+                    "model": cache_model,
+                    "prompt_version": PROMPT_VERSION,
+                }
+                ink_mask = tile_ink_masks.get(tile_id)
+
+                if tile.tiling_mode == "logical_grid" and _mask_has_no_text(ink_mask):
+                    # 只看单元格内部；网格线本身不会触发“有文字”。这种纯空表
+                    # 无需让自回归模型生成几百个重复的 <td>，直接保留预处理形状。
+                    markdown = _empty_tile_html(tile)
+                    source = "预处理判空，跳过模型"
                     self.cache.put_tile(
                         cache_key,
                         markdown,
                         {
-                            "tile": tile.to_dict(),
-                            "model": cache_model,
-                            "prompt_version": PROMPT_VERSION,
+                            **base_metadata,
+                            "empty_table_fallback": True,
+                            "empty_table_reason": "preprocess-no-cell-ink",
                         },
                     )
+                else:
+                    markdown = self.cache.get_tile(cache_key)
+                    source = "缓存"
+                    if markdown is not None and not markdown.strip():
+                        if tile.tiling_mode == "logical_grid":
+                            markdown = _empty_tile_html(tile)
+                            source = "空缓存修复"
+                            self.cache.put_tile(
+                                cache_key,
+                                markdown,
+                                {
+                                    **base_metadata,
+                                    "empty_table_fallback": True,
+                                    "empty_table_reason": "cached-empty-markdown",
+                                },
+                            )
+                        else:
+                            # 像素重叠切块没有可靠的逻辑行列数，不能凭空补表。
+                            markdown = None
+
+                    if markdown is None:
+                        # 参数升级后尝试迁移旧成功缓存。这里只检查响应能否解析；
+                        # 行列差异由后面的墨迹软对齐处理并写入 warning，避免把
+                        # 只是省略空行空列的结果再次送进模型。
+                        for legacy_model in _table_legacy_cache_models(client):
+                            legacy_key = self.cache.tile_key(
+                                image_bytes, prompt, legacy_model
+                            )
+                            candidate = self.cache.get_tile(legacy_key)
+                            if candidate is None:
+                                continue
+                            legacy_metadata = {
+                                **base_metadata,
+                                "migrated_from": legacy_model,
+                            }
+                            if not candidate.strip():
+                                if tile.tiling_mode != "logical_grid":
+                                    continue
+                                candidate = _empty_tile_html(tile)
+                                legacy_metadata.update(
+                                    {
+                                        "empty_table_fallback": True,
+                                        "empty_table_reason": "cached-empty-markdown",
+                                    }
+                                )
+                            elif tile.tiling_mode == "logical_grid":
+                                try:
+                                    normalize_table_response(candidate)
+                                except HtmlTableMergeError:
+                                    continue
+                            markdown = candidate
+                            source = "兼容缓存"
+                            self.cache.put_tile(
+                                cache_key, markdown, legacy_metadata
+                            )
+                            break
+
+                    if markdown is None:
+                        source = "API"
+                        print(
+                            f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
+                            f"{tile.file_name}：请求 API",
+                            flush=True,
+                        )
+                        empty_reason: str | None = None
+                        try:
+                            markdown = client.recognize(tile_path, prompt)
+                        except RuntimeError as error:
+                            if (
+                                tile.tiling_mode == "logical_grid"
+                                and "返回了空 Markdown" in str(error)
+                            ):
+                                markdown = _empty_tile_html(tile)
+                                empty_reason = "model-empty-markdown"
+                                source = "模型空响应，按预处理补空表"
+                            else:
+                                raise
+                        if not markdown.strip():
+                            if tile.tiling_mode != "logical_grid":
+                                raise RuntimeError(
+                                    "模型返回了空结果，且该切片没有可靠的预处理行列数"
+                                )
+                            markdown = _empty_tile_html(tile)
+                            empty_reason = "model-empty-markdown"
+                            source = "模型空响应，按预处理补空表"
+                        metadata = dict(base_metadata)
+                        if empty_reason is not None:
+                            metadata.update(
+                                {
+                                    "empty_table_fallback": True,
+                                    "empty_table_reason": empty_reason,
+                                }
+                            )
+                        self.cache.put_tile(cache_key, markdown, metadata)
+
                 (response_dir / f"{Path(tile.file_name).stem}.md").write_text(
                     markdown, encoding="utf-8"
                 )
                 completed_tiles += 1
                 print(
                     f"[图表识别 {completed_tiles:02d}/{total_tiles:02d}] "
-                    f"{tile.file_name}：{source}完成，Markdown {len(markdown)} 字符",
+                    f"{tile.file_name}：{source}完成，结果 {len(markdown)} 字符",
                     flush=True,
                 )
-                contents[(tile.row_index, tile.column_index)] = markdown
+                contents[tile_id] = markdown
 
             try:
                 if plans and plans[0].tiling_mode == "logical_grid":
