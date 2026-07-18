@@ -35,10 +35,12 @@
   "whitespace_vertical_dilate_ratio": 0.004,
   "repeat_header_rows": 0,
   "repeat_stub_columns": 0,
-  "max_logical_cells_per_tile": 320,
+  "max_logical_cells_per_tile": 280,
+  "preferred_min_logical_cells_per_tile": 80,
+  "max_tile_aspect_ratio": 8.0,
   "projection_threshold": 225,
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v10-column-line-contrast"
+  "pipeline_version": "table-v12-balanced-grid-tiles"
 }

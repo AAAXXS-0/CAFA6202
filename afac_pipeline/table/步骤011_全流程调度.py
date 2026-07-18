@@ -514,6 +514,8 @@ class TablePipeline:
                     self.config.max_vlm_side, self.config.single_tile_min_scale,
                     self.config.repeat_header_rows, self.config.repeat_stub_columns,
                     self.config.max_logical_cells_per_tile,
+                    self.config.preferred_min_logical_cells_per_tile,
+                    self.config.max_tile_aspect_ratio,
                 )
             if not plans:
                 # 保留“检测到了边界但存在超大单元格”的原因，避免清单把它

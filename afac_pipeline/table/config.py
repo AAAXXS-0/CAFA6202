@@ -60,14 +60,17 @@ class TableConfig:
     repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
     # 图片尺寸能装下，不代表几千个单元格也能一次写完。
-    # FireRed 实测 552 格会撞到 8192 token 上限，HTML 在半行中截断；
-    # 320 格可完整输出，又不会像 160 格那样几乎翻倍切片数。
-    max_logical_cells_per_tile: int = 320
+    # 280 格会拆开已知会截断的 304 格复杂表，又比 240 格少很多请求。
+    max_logical_cells_per_tile: int = 280
+    # 这是规划优选目标，不是硬限制；整张小表仍可少于 80 格。
+    preferred_min_logical_cells_per_tile: int = 80
+    # 极端细长块即使格子不多，也继续沿长边拆分以保留表格语义。
+    max_tile_aspect_ratio: float = 8.0
     projection_threshold: int = 225
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v10-column-line-contrast"
+    pipeline_version: str = "table-v12-balanced-grid-tiles"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -136,6 +139,13 @@ class TableConfig:
             raise ValueError("重复表头行数和行名列数不能为负数")
         if self.max_logical_cells_per_tile < 32:
             raise ValueError("单个图表切片的逻辑单元格上限至少为 32")
+        if not (
+            1 <= self.preferred_min_logical_cells_per_tile
+            <= self.max_logical_cells_per_tile
+        ):
+            raise ValueError("优选最小逻辑格数必须位于 1 和单块上限之间")
+        if self.max_tile_aspect_ratio < 1:
+            raise ValueError("逻辑切片最大宽高比不能小于 1")
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "TableConfig":

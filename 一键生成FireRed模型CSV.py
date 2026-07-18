@@ -96,6 +96,29 @@ def 检查输出行数(path: Path, expected: int) -> None:
         )
 
 
+def 迁移旧缓存(branch: str, current_work: Path) -> None:
+    """配置变化时复用图片字节完全相同的旧 FireRed 切片。"""
+
+    from afac_pipeline.common.cache import merge_result_caches
+
+    destination = current_work / "cache.sqlite3"
+    candidates = sorted(
+        (
+            path
+            for path in FireRed工作根目录.glob(f"{branch}_*/cache.sqlite3")
+            if path.resolve() != destination.resolve()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    inserted = merge_result_caches(destination, candidates)
+    print(
+        f"[FireRed 缓存迁移] {branch}：新增整图 "
+        f"{inserted['image_results']} 条、切片 {inserted['tile_results']} 条",
+        flush=True,
+    )
+
+
 def main() -> int:
     切换到FireRed环境()
     os.chdir(项目根目录)
@@ -183,6 +206,11 @@ def main() -> int:
             ]
         )
 
+    long_work = FireRed工作根目录 / f"长图_{long_config.digest()[:12]}"
+    table_work = FireRed工作根目录 / f"图表_{table_config.digest()[:12]}"
+    迁移旧缓存("长图", long_work)
+    迁移旧缓存("图表", table_work)
+
     long_max_pixels = int(
         os.environ.get("FIRERED_LONG_MAX_PIXELS", str(1024 * 28 * 28))
     )
@@ -208,8 +236,6 @@ def main() -> int:
         table_max_new_tokens=table_max_tokens,
     )
 
-    long_work = FireRed工作根目录 / f"长图_{long_config.digest()[:12]}"
-    table_work = FireRed工作根目录 / f"图表_{table_config.digest()[:12]}"
     输出目录.mkdir(parents=True, exist_ok=True)
     long_csv = 输出目录 / "长图结果.csv"
     table_csv = 输出目录 / "图表结果.csv"

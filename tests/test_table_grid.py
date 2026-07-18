@@ -73,7 +73,7 @@ class TableGridTest(unittest.TestCase):
         self.assertTrue(all(plan.output_width <= 3900 for plan in plans))
 
     def test_default_output_budget_matches_firered_safe_limit(self) -> None:
-        self.assertEqual(TableConfig().max_logical_cells_per_tile, 320)
+        self.assertEqual(TableConfig().max_logical_cells_per_tile, 280)
         boundaries = tuple(range(0, 1801, 100))
         plans = plan_grid_tiles(
             Box(0, 0, 1800, 1800), 0, boundaries, boundaries,
@@ -83,9 +83,60 @@ class TableGridTest(unittest.TestCase):
         self.assertGreater(len(plans), 1)
         self.assertTrue(all(
             (plan.logical_row_end - plan.logical_row_start)
-            * (plan.logical_column_end - plan.logical_column_start) <= 320
+            * (plan.logical_column_end - plan.logical_column_start) <= 280
             for plan in plans
         ))
+
+    def test_balanced_split_avoids_small_remainder_tiles(self) -> None:
+        rows = tuple(round(index * 350 / 23) for index in range(24))
+        columns = tuple(round(index * 1315 / 24) for index in range(25))
+        plans = plan_grid_tiles(
+            Box(0, 0, 1315, 350), 0, rows, columns,
+            max_side=3900, single_tile_min_scale=0.65,
+            repeat_header_rows=0, repeat_stub_columns=0,
+        )
+        shapes = [
+            (
+                plan.logical_row_end - plan.logical_row_start,
+                plan.logical_column_end - plan.logical_column_start,
+            )
+            for plan in plans
+        ]
+        self.assertEqual(shapes, [(23, 12), (23, 12)])
+
+    def test_extreme_aspect_ratio_is_split_even_below_cell_budget(self) -> None:
+        rows = tuple(round(index * 130 / 8) for index in range(9))
+        columns = tuple(round(index * 1679 / 24) for index in range(25))
+        plans = plan_grid_tiles(
+            Box(0, 0, 1679, 130), 0, rows, columns,
+            max_side=3900, single_tile_min_scale=0.65,
+            repeat_header_rows=0, repeat_stub_columns=0,
+        )
+        shapes = [
+            (
+                plan.logical_row_end - plan.logical_row_start,
+                plan.logical_column_end - plan.logical_column_start,
+            )
+            for plan in plans
+        ]
+        self.assertEqual(shapes, [(8, 12), (8, 12)])
+
+    def test_irregular_wide_columns_still_force_minimum_split_count(self) -> None:
+        """即使某个逻辑列特别宽，整体细长表也不应退回单块。"""
+
+        rows = (0, 10, 70, 85)
+        columns = (
+            0, 10, 60, 100, 145, 190, 235, 275, 320, 365,
+            410, 465, 495, 570, 600, 694, 739, 784, 1529, 2268,
+            2308, 2353, 2398, 2528, 2573, 2618, 2663, 2708, 2758, 2768,
+        )
+        plans = plan_grid_tiles(
+            Box(0, 0, 2768, 85), 0, rows, columns,
+            max_side=3900, single_tile_min_scale=0.65,
+            repeat_header_rows=0, repeat_stub_columns=0,
+        )
+        self.assertGreaterEqual(len(plans), 5)
+        self.assertTrue(all(plan.column_count > 1 for plan in plans))
 
     def test_borderless_table_uses_whitespace_only_after_line_detection_fails(self) -> None:
         image = Image.new("RGB", (600, 420), "white")
