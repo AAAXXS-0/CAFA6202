@@ -675,6 +675,10 @@ class TablePipeline:
 
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
+        image_info = image_manifest["image"]
+        image_name = str(
+            image_info.get("file_name") or Path(image_info["path"]).name
+        )
         region_markdowns: list[str] = []
         cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
@@ -705,6 +709,10 @@ class TablePipeline:
                 tile = self._tile_from_dict(raw_tile)
                 tile_id = (tile.row_index, tile.column_index)
                 tile_path = manifest_path.parent / "tiles" / tile.file_name
+                request_label = (
+                    f"原图 {image_name} / 区域 {region['index'] + 1} / "
+                    f"切块 {tile.file_name}"
+                )
                 # 官方 multipart 只上传图片和三个文本字段，不生成、不发送 prompt。
                 prompt = select_request_prompt(
                     getattr(client, "protocol", CHAT_PROTOCOL),
@@ -713,6 +721,7 @@ class TablePipeline:
                 image_bytes = tile_path.read_bytes()
                 cache_key = self.cache.tile_key(image_bytes, prompt, cache_model)
                 base_metadata = {
+                    "source_image": image_name,
                     "tile": tile.to_dict(),
                     "model": cache_model,
                     "prompt_version": PROMPT_VERSION,
@@ -794,12 +803,19 @@ class TablePipeline:
                         source = "API"
                         print(
                             f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
-                            f"{tile.file_name}：请求 API",
+                            f"{request_label}：请求 API",
                             flush=True,
                         )
                         empty_reason: str | None = None
                         try:
-                            markdown = client.recognize(tile_path, prompt)
+                            if isinstance(client, FinixDocClient):
+                                markdown = client.recognize(
+                                    tile_path,
+                                    prompt,
+                                    request_label=request_label,
+                                )
+                            else:
+                                markdown = client.recognize(tile_path, prompt)
                         except RuntimeError as error:
                             if (
                                 tile.tiling_mode == "logical_grid"
@@ -834,7 +850,7 @@ class TablePipeline:
                 completed_tiles += 1
                 print(
                     f"[图表识别 {completed_tiles:02d}/{total_tiles:02d}] "
-                    f"{tile.file_name}：{source}完成，结果 {len(markdown)} 字符",
+                    f"{request_label}：{source}完成，结果 {len(markdown)} 字符",
                     flush=True,
                 )
                 contents[tile_id] = markdown
@@ -872,7 +888,8 @@ class TablePipeline:
                     )
                     for warning in quality.get("warnings", []):
                         print(
-                            f"[图表警告] 区域 {region['index'] + 1}：{warning}",
+                            f"[图表警告] 原图 {image_name} / "
+                            f"区域 {region['index'] + 1}：{warning}",
                             flush=True,
                         )
                 else:
@@ -884,6 +901,7 @@ class TablePipeline:
             except (MarkdownMergeError, HtmlTableMergeError) as error:
                 warning_data = {
                     "status": "warning",
+                    "source_image": image_name,
                     "region_index": region["index"],
                     "error": str(error),
                     "fallback": "按切片顺序保留模型原始输出",
@@ -901,6 +919,7 @@ class TablePipeline:
                 _json_dump(
                     manifest_path.parent / "merge_warning.json",
                     {
+                        "source_image": image_name,
                         "region_index": region["index"],
                         "error": str(error),
                         "responses": {
@@ -910,7 +929,8 @@ class TablePipeline:
                     },
                 )
                 print(
-                    f"[图表警告] 区域 {region['index'] + 1} 无法可靠合并："
+                    f"[图表警告] 原图 {image_name} / "
+                    f"区域 {region['index'] + 1} 无法可靠合并："
                     f"{error}；已保留模型原始输出继续生成。",
                     flush=True,
                 )
@@ -943,8 +963,12 @@ class TablePipeline:
             raise ValueError("max_workers 必须大于 0")
 
         unique_items: dict[str, dict[str, Any]] = {}
+        aliases: dict[str, list[str]] = {}
         for item in dataset_manifest["items"]:
             unique_items.setdefault(item["canonical_file_name"], item)
+            aliases.setdefault(item["canonical_file_name"], []).append(
+                item["file_name"]
+            )
 
         def recognize_one(item: dict[str, Any]) -> tuple[str, str]:
             canonical_name = item["canonical_file_name"]
@@ -965,9 +989,33 @@ class TablePipeline:
                 )
             return canonical_name, cached
 
+        def recognize_safely(
+            item: dict[str, Any],
+        ) -> tuple[str, str | None, dict[str, Any] | None]:
+            """单张图失败只隔离该图，其他图片继续识别并积累缓存。"""
+
+            canonical_name = item["canonical_file_name"]
+            try:
+                name, markdown = recognize_one(item)
+                return name, markdown, None
+            except Exception as error:
+                failure = {
+                    "canonical_file_name": canonical_name,
+                    "file_names": aliases[canonical_name],
+                    "image_manifest": item["image_manifest"],
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                print(
+                    f"[图表失败] 原图 {canonical_name}：{error}；"
+                    "未写整图缓存，继续处理其他图片。",
+                    flush=True,
+                )
+                return canonical_name, None, failure
+
         canonical_items = list(unique_items.values())
         if max_workers == 1 or len(canonical_items) <= 1:
-            pairs = [recognize_one(item) for item in canonical_items]
+            outcomes = [recognize_safely(item) for item in canonical_items]
         else:
             worker_count = min(max_workers, len(canonical_items))
             print(
@@ -976,16 +1024,50 @@ class TablePipeline:
                 flush=True,
             )
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                pairs = list(executor.map(recognize_one, canonical_items))
-        canonical_results = dict(pairs)
+                outcomes = list(executor.map(recognize_safely, canonical_items))
+        canonical_results = {
+            name: markdown
+            for name, markdown, _ in outcomes
+            if markdown is not None
+        }
+        failures = [
+            failure for _, _, failure in outcomes if failure is not None
+        ]
 
         results = {
             item["file_name"]: canonical_results[item["canonical_file_name"]]
             for item in dataset_manifest["items"]
+            if item["canonical_file_name"] in canonical_results
         }
         results_dir = self.work_dir / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
         for file_name, markdown in results.items():
-            (results_dir / f"{Path(file_name).stem}.md").write_text(markdown, encoding="utf-8")
+            result_path = (
+                results_dir / f"{Path(file_name).stem}.md"
+            )
+            result_path.write_text(markdown, encoding="utf-8")
+
+        failure_report_path = self.work_dir / "recognition_failures.json"
+        _json_dump(
+            failure_report_path,
+            {
+                "status": "incomplete" if failures else "ok",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "failure_count": len(failures),
+                "successful_unique_images": len(canonical_results),
+                "failures": failures,
+            },
+        )
+        if failures:
+            partial_csv = self.work_dir / "partial_results.csv"
+            write_submission(results, partial_csv)
+            failed_names = ", ".join(
+                failure["canonical_file_name"]
+                for failure in failures
+            )
+            raise RuntimeError(
+                f"图表识别跑完其他图片后仍有 {len(failures)} 张失败；"
+                f"失败原图：{failed_names}；详情：{failure_report_path}"
+            )
         write_submission(results, output_csv)
         return results

@@ -289,6 +289,11 @@ prepared/<文件名_哈希>/
 
 每个 API 原始回答保存在 `responses/request_*.md`，去掉重复上下文标题后真正用于聚合的版本保存在 `responses/request_*_聚合输入.md`。
 
+API 日志会同时打印原图名和请求切块名。若某块退让耗尽，仅对应原图暂时无法
+聚合；它此前成功的切块仍在 SQLite 中，其他原图继续运行。批次结束后失败详情
+写入 `recognition_failures.json`，成功图片另存到 `partial_results.csv`。重跑时
+只补失败原图尚未成功的切块。
+
 ## 当前真实验证
 
 同批五图前后对照目录：

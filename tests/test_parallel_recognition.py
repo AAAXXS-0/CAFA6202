@@ -35,6 +35,22 @@ class ActivityTracker:
             self.active -= 1
         return f"结果：{manifest_path.stem}"
 
+class FailureTracker:
+    """让指定原图失败，同时记录整批实际执行过的图片。"""
+
+    def __init__(self, failed_stem: str) -> None:
+        self.failed_stem = failed_stem
+        self.lock = Lock()
+        self.calls: list[str] = []
+
+    def __call__(self, manifest_path: Path, client: FakeClient) -> str:
+        with self.lock:
+            self.calls.append(manifest_path.stem)
+        if manifest_path.stem == self.failed_stem:
+            raise RuntimeError("模拟退让耗尽")
+        return f"结果：{manifest_path.stem}"
+
+
 
 class ParallelRecognitionTest(unittest.TestCase):
     def _manifest(self, root: Path, count: int = 8) -> Path:
@@ -117,6 +133,67 @@ class ParallelRecognitionTest(unittest.TestCase):
                         )
                     self.assertEqual(cached, results)
                     self.assertEqual(cached_tracker.calls, 0)
+
+    def test_one_failed_image_does_not_cancel_the_remaining_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._manifest(root)
+            cases = [
+                (
+                    "long",
+                    LongPipeline(
+                        LongConfig(backend="pillow"),
+                        root / "long_failure_work",
+                    ),
+                ),
+                (
+                    "table",
+                    TablePipeline(
+                        TableConfig(backend="pillow", detector="projection"),
+                        root / "table_failure_work",
+                    ),
+                ),
+            ]
+            for name, pipeline in cases:
+                with self.subTest(branch=name):
+                    tracker = FailureTracker("manifest_02")
+                    output = root / f"{name}_failure.csv"
+                    with patch.object(
+                        pipeline,
+                        "_recognize_manifest",
+                        side_effect=tracker,
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "image_02"):
+                            pipeline.recognize_dataset(
+                                manifest,
+                                FakeClient(),
+                                output,
+                                max_workers=6,
+                            )
+                    self.assertEqual(len(tracker.calls), 8)
+                    report_path = pipeline.work_dir / "recognition_failures.json"
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    self.assertEqual(report["failure_count"], 1)
+                    self.assertEqual(
+                        report["failures"][0]["canonical_file_name"],
+                        "image_02.png",
+                    )
+                    self.assertTrue((pipeline.work_dir / "partial_results.csv").is_file())
+
+                    retry_tracker = ActivityTracker()
+                    with patch.object(
+                        pipeline,
+                        "_recognize_manifest",
+                        side_effect=retry_tracker,
+                    ):
+                        results = pipeline.recognize_dataset(
+                            manifest,
+                            FakeClient(),
+                            output,
+                            max_workers=6,
+                        )
+                    self.assertEqual(retry_tracker.calls, 1)
+                    self.assertEqual(len(results), 8)
 
     def test_worker_count_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

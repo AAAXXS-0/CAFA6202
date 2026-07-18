@@ -124,12 +124,21 @@ class FinixDocBusyResponseTest(unittest.TestCase):
         with (
             patch("requests.post", side_effect=[empty, success]) as mocked_post,
             patch("afac_pipeline.common.vlm_client.time.sleep") as mocked_sleep,
+            patch("builtins.print") as mocked_print,
         ):
-            self.assertEqual(client.recognize(__file__, ""), "# 重试成功")
+            self.assertEqual(
+                client.recognize(
+                    __file__, "", request_label="原图 sample.jpg / 切块 tile.png"
+                ),
+                "# 重试成功",
+            )
 
         self.assertEqual(
             [item.kwargs["data"]["userId"] for item in mocked_post.call_args_list],
             ["finixA1001", "finixB2002"],
+        )
+        self.assertIn(
+            "原图 sample.jpg / 切块 tile.png", mocked_print.call_args.args[0]
         )
         mocked_sleep.assert_called_once_with(64.0)
 

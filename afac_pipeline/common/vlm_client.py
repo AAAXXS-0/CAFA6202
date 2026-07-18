@@ -278,7 +278,13 @@ class FinixDocClient:
             raise FinixDocTemporaryError("官方接口返回了无法解析的 JSON") from error
         return parse_official_response(payload)
 
-    def recognize(self, image_path: Path, prompt: str) -> str:
+    def recognize(
+        self,
+        image_path: Path,
+        prompt: str,
+        *,
+        request_label: str | None = None,
+    ) -> str:
         """识别图片，并在临时错误后轮换白名单账号重试。
 
         max_retries 表示首次请求失败后最多再试多少次，硬上限为 15。
@@ -288,6 +294,7 @@ class FinixDocClient:
 
         last_error: Exception | None = None
         image_path = Path(image_path)
+        display_name = request_label or image_path.name
         users = self._available_user_ids()
         # Chat 协议不使用 userId；保留 None 占位以复用相同的重试循环。
         attempt_users: list[str | None] = users or [None]
@@ -326,7 +333,7 @@ class FinixDocClient:
                 next_user_text = next_user or "无 userId"
                 print(
                     f"[FinixDoc-VL 重试 {retry_number}/{self.max_retries}] "
-                    f"{image_path.name}：账号 {current_user_text} 请求失败：{error}；"
+                    f"{display_name}：账号 {current_user_text} 请求失败：{error}；"
                     f"{delay:.0f} 秒后改用 {next_user_text}",
                     flush=True,
                 )

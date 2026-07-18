@@ -298,6 +298,10 @@ class LongPipeline:
 
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
+        image_info = image_manifest["image"]
+        image_name = str(
+            image_info.get("file_name") or Path(image_info["path"]).name
+        )
         current = ""
         seen_heading_text: dict[str, str] = {}
         response_dir = manifest_path.parent / "responses"
@@ -306,6 +310,9 @@ class LongPipeline:
         for index, raw_pack in enumerate(raw_packs, start=1):
             pack = RecognitionPack.from_dict(raw_pack)
             crop_path = manifest_path.parent / "vlm_requests" / pack.file_name
+            request_label = (
+                f"原图 {image_name} / 切块 {pack.file_name}"
+            )
             # 官方 multipart 文档没有 prompt 字段：官方模式连提示词都不生成。
             # 只有本地 Chat Completions 兼容服务才使用自定义提示词。
             prompt = select_request_prompt(
@@ -324,7 +331,7 @@ class LongPipeline:
                 source = "API"
                 print(
                     f"[长图识别 {index:02d}/{len(raw_packs):02d}] "
-                    f"{pack.file_name}：请求 API",
+                    f"{request_label}：请求 API",
                     flush=True,
                 )
                 recognize_long_pack = getattr(client, "recognize_long_pack", None)
@@ -337,11 +344,19 @@ class LongPipeline:
                         self.config.semantic_context_gap,
                     )
                 else:
-                    markdown = client.recognize(crop_path, prompt)
+                    if isinstance(client, FinixDocClient):
+                        markdown = client.recognize(
+                            crop_path,
+                            prompt,
+                            request_label=request_label,
+                        )
+                    else:
+                        markdown = client.recognize(crop_path, prompt)
                 self.cache.put_tile(
                     cache_key,
                     markdown,
                     {
+                        "source_image": image_name,
                         "pack": pack.to_dict(),
                         "model": cache_model,
                         "prompt_version": LONG_PROMPT_VERSION,
@@ -362,7 +377,7 @@ class LongPipeline:
             )
             print(
                 f"[长图识别 {index:02d}/{len(raw_packs):02d}] "
-                f"{pack.file_name}：{source}完成，Markdown {len(markdown)} 字符",
+                f"{request_label}：{source}完成，Markdown {len(markdown)} 字符",
                 flush=True,
             )
             if not current:
@@ -394,8 +409,12 @@ class LongPipeline:
             raise ValueError("max_workers 必须大于 0")
 
         unique_items: dict[str, dict[str, Any]] = {}
+        aliases: dict[str, list[str]] = {}
         for item in dataset_manifest["items"]:
             unique_items.setdefault(item["canonical_file_name"], item)
+            aliases.setdefault(item["canonical_file_name"], []).append(
+                item["file_name"]
+            )
 
         def recognize_one(item: dict[str, Any]) -> tuple[str, str]:
             canonical_name = item["canonical_file_name"]
@@ -416,9 +435,33 @@ class LongPipeline:
                 )
             return canonical_name, markdown
 
+        def recognize_safely(
+            item: dict[str, Any],
+        ) -> tuple[str, str | None, dict[str, Any] | None]:
+            """单张图失败只隔离该图，其他图片继续识别并积累缓存。"""
+
+            canonical_name = item["canonical_file_name"]
+            try:
+                name, markdown = recognize_one(item)
+                return name, markdown, None
+            except Exception as error:
+                failure = {
+                    "canonical_file_name": canonical_name,
+                    "file_names": aliases[canonical_name],
+                    "image_manifest": item["image_manifest"],
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                print(
+                    f"[长图失败] 原图 {canonical_name}：{error}；"
+                    "未写整图缓存，继续处理其他图片。",
+                    flush=True,
+                )
+                return canonical_name, None, failure
+
         canonical_items = list(unique_items.values())
         if max_workers == 1 or len(canonical_items) <= 1:
-            pairs = [recognize_one(item) for item in canonical_items]
+            outcomes = [recognize_safely(item) for item in canonical_items]
         else:
             worker_count = min(max_workers, len(canonical_items))
             print(
@@ -427,16 +470,48 @@ class LongPipeline:
                 flush=True,
             )
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                pairs = list(executor.map(recognize_one, canonical_items))
-        canonical_results = dict(pairs)
+                outcomes = list(executor.map(recognize_safely, canonical_items))
+        canonical_results = {
+            name: markdown
+            for name, markdown, _ in outcomes
+            if markdown is not None
+        }
+        failures = [
+            failure for _, _, failure in outcomes if failure is not None
+        ]
 
         results = {
             item["file_name"]: canonical_results[item["canonical_file_name"]]
             for item in dataset_manifest["items"]
+            if item["canonical_file_name"] in canonical_results
         }
         result_dir = self.work_dir / "results"
         result_dir.mkdir(parents=True, exist_ok=True)
         for file_name, markdown in results.items():
-            (result_dir / f"{Path(file_name).stem}.md").write_text(markdown, encoding="utf-8")
+            result_path = result_dir / f"{Path(file_name).stem}.md"
+            result_path.write_text(markdown, encoding="utf-8")
+
+        failure_report_path = self.work_dir / "recognition_failures.json"
+        _dump_json(
+            failure_report_path,
+            {
+                "status": "incomplete" if failures else "ok",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "failure_count": len(failures),
+                "successful_unique_images": len(canonical_results),
+                "failures": failures,
+            },
+        )
+        if failures:
+            partial_csv = self.work_dir / "partial_results.csv"
+            write_submission(results, partial_csv)
+            failed_names = ", ".join(
+                failure["canonical_file_name"]
+                for failure in failures
+            )
+            raise RuntimeError(
+                f"长图识别跑完其他图片后仍有 {len(failures)} 张失败；"
+                f"失败原图：{failed_names}；详情：{failure_report_path}"
+            )
         write_submission(results, output_csv)
         return results
