@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 
+from afac_pipeline.common.cache import merge_result_caches
 from afac_pipeline.common.hashing import discover_images
 from afac_pipeline.common.submission import combine_submissions
 from afac_pipeline.common.vlm_client import (
@@ -33,6 +34,7 @@ from afac_pipeline.table import TableConfig, TablePipeline
 输出目录 = 项目根目录 / "outputs/最终提交"
 默认并行数 = 6
 最大并行数 = 32
+默认请求超时秒数 = 600
 
 
 def 检查固定文件() -> None:
@@ -104,6 +106,37 @@ def 准备图表(config: TableConfig, work_dir: Path) -> Path:
     return TablePipeline(config, work_dir).prepare_directory(图表输入目录)
 
 
+def 迁移旧缓存(work_root: Path, branch: str, current_work: Path) -> None:
+    """配置改变后复用旧目录中图片字节完全相同的 API 成功切片。"""
+
+    destination = current_work / "cache.sqlite3"
+    candidates = sorted(
+        (
+            path
+            for path in work_root.glob(f"{branch}_*/cache.sqlite3")
+            if path.resolve() != destination.resolve()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    inserted = merge_result_caches(destination, candidates)
+    print(
+        f"[缓存迁移] {branch}：旧目录 {len(candidates)} 个，"
+        f"新增整图 {inserted['image_results']} 条、切片 "
+        f"{inserted['tile_results']} 条",
+        flush=True,
+    )
+
+
+def 检查输出行数(path: Path, expected: int) -> None:
+    """避免分支缺图时仍然生成表面上可提交的 CSV。"""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.DictReader(file))
+    if len(rows) != expected:
+        raise RuntimeError(f"{path.name} 应为 {expected} 行，实际为 {len(rows)} 行")
+
+
 def main() -> int:
     os.chdir(项目根目录)
     检查固定文件()
@@ -133,6 +166,13 @@ def main() -> int:
 
     long_manifest = 准备长图(long_config, long_work)
     table_manifest = 准备图表(table_config, table_work)
+    迁移旧缓存(work_root, "长图", long_work)
+    迁移旧缓存(work_root, "图表", table_work)
+    request_timeout = int(
+        os.environ.get("FINIXDOC_TIMEOUT", str(默认请求超时秒数))
+    )
+    if request_timeout < 30:
+        raise ValueError("FINIXDOC_TIMEOUT 不应小于 30 秒")
     user_id = os.environ.get("FINIXDOC_USER_ID", "finixB2002")
     max_retries = int(
         os.environ.get("FINIXDOC_MAX_RETRIES", str(MAX_RETRY_COUNT))
@@ -146,11 +186,12 @@ def main() -> int:
         f"等待从 {retry_delay_seconds(1):.0f}s 开始，按 8²、9²、10²……增长",
         flush=True,
     )
+    print(f"[API 超时] 每次请求最多等待 {request_timeout} 秒", flush=True)
     print("[缓存策略] 每个成功切片立即写入 SQLite；重新运行会跳过已成功切片", flush=True)
     client = FinixDocClient.from_official_doc(
         官方接口说明,
         user_id=user_id,
-        timeout=240,
+        timeout=request_timeout,
         max_retries=max_retries,
     )
     输出目录.mkdir(parents=True, exist_ok=True)
@@ -167,6 +208,7 @@ def main() -> int:
             long_csv,
             max_workers=workers,
         )
+        检查输出行数(long_csv, 50)
     except Exception as error:  # 保留另一分支继续积累缓存
         failures.append(f"长图识别失败：{error}")
         print(f"[长图识别失败] {error}", flush=True)
@@ -179,6 +221,7 @@ def main() -> int:
             table_csv,
             max_workers=workers,
         )
+        检查输出行数(table_csv, 50)
     except Exception as error:  # 保留长图已完成的缓存
         failures.append(f"图表识别失败：{error}")
         print(f"[图表识别失败] {error}", flush=True)
@@ -190,6 +233,7 @@ def main() -> int:
         return 1
 
     combine_submissions([long_csv, table_csv], 官方提交模板, final_csv)
+    检查输出行数(final_csv, 100)
     print(f"\n[全部完成] 最终提交文件：{final_csv}", flush=True)
     return 0
 

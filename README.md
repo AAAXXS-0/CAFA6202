@@ -191,7 +191,13 @@ PADDLEOCR_TABLE_MAX_NEW_TOKENS=4096 \
 ./一键生成最终CSV.sh
 ```
 
-脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到 `outputs/最终提交/finix_ab_A_submit.csv`。默认同时识别 6 张唯一图片，可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。
+脚本会自动准备两个分支、断点续跑官方 API、按模板合并 100 行结果，并输出到
+`outputs/最终提交/finix_ab_A_submit.csv`。官方协议严格只上传
+`userId/apiKey/fileName/file`，不发送自定义提示词。默认同时识别 6 张唯一图片，
+可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。每次请求默认超时
+600 秒，可用 `FINIXDOC_TIMEOUT` 覆盖；`FINIXDOC_MAX_RETRIES` 控制最多 15 次平方退避重试。
+配置变化时会自动迁移图片字节完全相同的旧切片缓存，并强制校验两个 50 行分支和
+最终 100 行 CSV。
 
 ## 统一命令行
 

@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Iterator
+from typing import Iterable, Iterator
 
 
 class ResultCache:
@@ -121,3 +121,50 @@ class ResultCache:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+
+def merge_result_caches(
+    destination: str | Path,
+    sources: Iterable[str | Path],
+) -> dict[str, int]:
+    """把旧工作目录的结果合并到新 SQLite，不覆盖已有成功结果。
+
+    切片缓存键同时包含图片字节、请求内容和模型签名，因此只有完全相同的
+    切片才会复用；旧的大块或其他模型结果不会误命中。
+    """
+
+    destination_path = Path(destination)
+    ResultCache(destination_path)
+    columns = {
+        "image_results": (
+            "image_sha256", "config_digest", "markdown", "metadata_json", "created_at"
+        ),
+        "tile_results": (
+            "cache_key", "markdown", "metadata_json", "created_at"
+        ),
+    }
+    inserted = {table: 0 for table in columns}
+    with sqlite3.connect(destination_path, timeout=60.0) as output:
+        output.execute("PRAGMA busy_timeout=60000")
+        for source in sources:
+            source_path = Path(source)
+            if not source_path.is_file():
+                continue
+            if source_path.resolve() == destination_path.resolve():
+                continue
+            with sqlite3.connect(source_path, timeout=60.0) as old:
+                old.execute("PRAGMA busy_timeout=60000")
+                for table, names in columns.items():
+                    name_list = ", ".join(names)
+                    placeholders = ", ".join("?" for _ in names)
+                    rows = old.execute(
+                        f"SELECT {name_list} FROM {table} ORDER BY created_at DESC"
+                    ).fetchall()
+                    before = output.total_changes
+                    output.executemany(
+                        f"INSERT OR IGNORE INTO {table} ({name_list}) "
+                        f"VALUES ({placeholders})",
+                        rows,
+                    )
+                    inserted[table] += output.total_changes - before
+    return inserted
