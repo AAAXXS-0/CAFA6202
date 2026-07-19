@@ -27,6 +27,10 @@ class TableConfig:
     # 生成用于分开同图异表的低清密度图。固定比例可避免同一套像素参数随
     # 原图尺寸变化而漂移。
     table_analysis_scale: float = 0.20
+    # 白带仍使用上面的 20% 分析图；只有容易被缩灰、缩断的黑表格线
+    # 单独回到分表后的原图区域，以 50% 分辨率检测。
+    table_black_line_scale: float = 0.50
+    table_black_analysis_max_side: int = 12000
     table_density_scale: float = 0.25
     table_analysis_max_side: int = 4608
     max_vlm_side: int = 3900
@@ -76,7 +80,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v13-strict-physical-grid-no-resize"
+    pipeline_version: str = "table-v14-black-lines-at-50-percent"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -87,6 +91,12 @@ class TableConfig:
             raise ValueError("preview_max_side 应位于 512 到 4096 之间")
         if not 0 < self.table_analysis_scale <= 1:
             raise ValueError("table_analysis_scale 必须位于 (0, 1] 内")
+        if not 0 < self.table_black_line_scale <= 1:
+            raise ValueError("table_black_line_scale 必须位于 (0, 1] 内")
+        if self.table_black_line_scale < self.table_analysis_scale:
+            raise ValueError("黑线分析比例不能低于白带分析比例")
+        if not 512 <= self.table_black_analysis_max_side <= 20000:
+            raise ValueError("黑线分析图安全上限应位于 512 到 20000 之间")
         if not 0 < self.table_density_scale <= 1:
             raise ValueError("table_density_scale 必须位于 (0, 1] 内")
         if not 512 <= self.table_analysis_max_side <= 8192:

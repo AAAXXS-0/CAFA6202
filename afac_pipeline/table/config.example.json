@@ -6,6 +6,8 @@
   "yolo_imgsz": 1280,
   "preview_max_side": 1800,
   "table_analysis_scale": 0.20,
+  "table_black_line_scale": 0.50,
+  "table_black_analysis_max_side": 12000,
   "table_density_scale": 0.25,
   "table_analysis_max_side": 4608,
   "max_vlm_side": 3900,
@@ -43,5 +45,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v13-strict-physical-grid-no-resize"
+  "pipeline_version": "table-v14-black-lines-at-50-percent"
 }

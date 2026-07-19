@@ -15,6 +15,7 @@ class V6StructureTest(unittest.TestCase):
     def test_official_defaults_are_fixed_scale_v6_values(self) -> None:
         config = TableConfig()
         self.assertEqual(config.table_analysis_scale, 0.20)
+        self.assertEqual(config.table_black_line_scale, 0.50)
         self.assertEqual(
             config.table_analysis_scale * config.table_density_scale,
             0.05,
@@ -104,6 +105,34 @@ class V6StructureTest(unittest.TestCase):
         )
         self.assertEqual(diagnostics.column_source, "white-band")
         self.assertIn("中部没有物理边界", diagnostics.column_reliability)
+
+    def test_black_lines_can_use_fifty_percent_image_without_changing_white_image(
+        self,
+    ) -> None:
+        """黑线来自高分辨率图，白带分析图仍可保持原来的低分辨率。"""
+
+        white_analysis = Image.new("RGB", (200, 120), "white")
+        black_analysis = Image.new("RGB", (1000, 600), "white")
+        draw = ImageDraw.Draw(black_analysis)
+        for y in (0, 120, 240, 360, 480, 599):
+            draw.line((0, y, 999, y), fill="black", width=3)
+        for x in (0, 200, 400, 600, 800, 999):
+            draw.line((x, 0, x, 599), fill="black", width=3)
+
+        grid, diagnostics = detect_v6_grid(
+            white_analysis,
+            Box(0, 0, 2000, 1200),
+            TableConfig(grid_black_column_min_contrast=10),
+            black_analysis_image=black_analysis,
+        )
+
+        self.assertTrue(grid.available, diagnostics.to_dict())
+        self.assertTrue(diagnostics.row_source.startswith("black-line"))
+        self.assertTrue(diagnostics.column_source.startswith("black-line"))
+        self.assertGreaterEqual(len(diagnostics.black_rows), 5)
+        self.assertGreaterEqual(len(diagnostics.black_columns), 5)
+        self.assertEqual(diagnostics.black_rows_at_whitespace_scale, ())
+        self.assertEqual(diagnostics.black_columns_at_whitespace_scale, ())
 
 
 if __name__ == "__main__":

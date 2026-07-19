@@ -47,6 +47,8 @@ class V6GridDiagnostics:
     white_columns: tuple[int, ...]
     row_reliability: str = ""
     column_reliability: str = ""
+    black_rows_at_whitespace_scale: tuple[LineSegment, ...] = ()
+    black_columns_at_whitespace_scale: tuple[LineSegment, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,8 +58,22 @@ class V6GridDiagnostics:
             "black_columns": [line.__dict__ for line in self.black_columns],
             "white_rows": list(self.white_rows),
             "white_columns": list(self.white_columns),
+            "black_row_count": len(self.black_rows),
+            "black_column_count": len(self.black_columns),
+            "black_row_count_at_whitespace_scale": len(
+                self.black_rows_at_whitespace_scale
+            ),
+            "black_column_count_at_whitespace_scale": len(
+                self.black_columns_at_whitespace_scale
+            ),
             "row_reliability": self.row_reliability,
             "column_reliability": self.column_reliability,
+            "black_rows_at_whitespace_scale": [
+                line.__dict__ for line in self.black_rows_at_whitespace_scale
+            ],
+            "black_columns_at_whitespace_scale": [
+                line.__dict__ for line in self.black_columns_at_whitespace_scale
+            ],
         }
 
 
@@ -191,6 +207,7 @@ def adaptive_line_segments(
     grayscale: np.ndarray | None = None,
     endpoint_trim_ratio: float = 0.0,
     minimum_contrast: float = 0.0,
+    contrast_offset_scale: float = 1.0,
 ) -> list[LineSegment]:
     """按覆盖率找整线，并可用中段覆盖率和邻域对比排除数字竖笔画。"""
 
@@ -218,9 +235,18 @@ def adaptive_line_segments(
         measure_end = end - trim
         scores[index] = float(data[index, measure_start:measure_end].mean())
         if gray_data is not None and minimum_contrast > 0:
+            # 20% 图原来使用左右 2～3 像素。黑线图提高到 50% 后，按
+            # 分辨率同比例把取样位置移到 5～8 像素外，避免仍取在线芯里。
+            offsets = sorted(
+                {
+                    int(round(offset * contrast_offset_scale))
+                    for offset in (-3, -2, 2, 3)
+                }
+            )
             shoulder_indices = [
                 neighbor
-                for neighbor in (index - 3, index - 2, index + 2, index + 3)
+                for offset in offsets
+                if (neighbor := index + offset) != index
                 if 0 <= neighbor < len(gray_data)
             ]
             if not shoulder_indices:
@@ -326,47 +352,101 @@ def detect_v6_grid(
     analysis_image: Image.Image,
     source_region: Box,
     config: TableConfig,
+    *,
+    black_analysis_image: Image.Image | None = None,
 ) -> tuple[GridStructure, V6GridDiagnostics]:
-    """对一张已分开的表检测逻辑行列边界，并映射回原图坐标。"""
+    """用高分辨率图找黑线、原 20% 图找白带，再映射回原图。"""
 
-    gray = np.asarray(analysis_image.convert("L"))
-    ink = gray < config.grid_white_threshold
-    envelope = content_envelope_mask(ink)
-    black_rows = adaptive_line_segments(ink, envelope, 0, config.grid_black_line_ratio)
+    # 白带链路保持原来的 20% 灰度图不变。
+    white_gray = np.asarray(analysis_image.convert("L"))
+    white_ink = white_gray < config.grid_white_threshold
+
+    # 黑线可以单独使用分表区域的 50% 图。测试或历史调用没有传入时，
+    # 仍退回同一张分析图，保证接口向后兼容。
+    black_image = black_analysis_image or analysis_image
+    black_gray = np.asarray(black_image.convert("L"))
+    black_ink = black_gray < config.grid_white_threshold
+    black_envelope = content_envelope_mask(black_ink)
+    resolution_ratio = max(
+        black_image.width / analysis_image.width,
+        black_image.height / analysis_image.height,
+    )
+    black_rows = adaptive_line_segments(
+        black_ink,
+        black_envelope,
+        0,
+        config.grid_black_line_ratio,
+    )
     black_columns = adaptive_line_segments(
-        ink,
-        envelope,
+        black_ink,
+        black_envelope,
         1,
         config.grid_black_column_line_ratio,
-        grayscale=gray,
+        grayscale=black_gray,
+        endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
+        minimum_contrast=config.grid_black_column_min_contrast,
+        contrast_offset_scale=resolution_ratio,
+    )
+
+    # 白带分支以及它的交叉线擦除继续完全依据 20% 图自身结果，不能让
+    # 新的 50% 黑线检测反过来改变已经稳定的白带。
+    white_envelope = content_envelope_mask(white_ink)
+    white_black_rows = adaptive_line_segments(
+        white_ink,
+        white_envelope,
+        0,
+        config.grid_black_line_ratio,
+    )
+    white_black_columns = adaptive_line_segments(
+        white_ink,
+        white_envelope,
+        1,
+        config.grid_black_column_line_ratio,
+        grayscale=white_gray,
         endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
         minimum_contrast=config.grid_black_column_min_contrast,
     )
+
     reliable = config.grid_reliable_line_count
     row_is_black, row_black_reason = _black_lines_are_distributed(
         black_rows,
-        analysis_image.height,
+        black_image.height,
         reliable,
         config.grid_interior_margin_ratio,
     )
     column_is_black, column_black_reason = _black_lines_are_distributed(
         black_columns,
-        analysis_image.width,
+        black_image.width,
         reliable,
         config.grid_interior_margin_ratio,
     )
-    # 某个方向使用白带兜底时，先擦掉另一方向已经确认的黑线。否则水平
-    # 表格线会贯穿所有列（或竖线贯穿所有行），把真实白带堵死。
+    white_row_has_black = _black_lines_are_distributed(
+        white_black_rows,
+        analysis_image.height,
+        reliable,
+        config.grid_interior_margin_ratio,
+    )[0]
+    white_column_has_black = _black_lines_are_distributed(
+        white_black_columns,
+        analysis_image.width,
+        reliable,
+        config.grid_interior_margin_ratio,
+    )[0]
+
+    # 这是原有白带逻辑：找某方向白带前，只擦掉另一方向已确认的黑线。
     ink_for_rows = (
-        _erase_perpendicular_lines(ink, black_columns, axis=1)
-        if column_is_black
-        else ink
+        _erase_perpendicular_lines(white_ink, white_black_columns, axis=1)
+        if white_column_has_black
+        else white_ink
     )
     ink_for_columns = (
-        _erase_perpendicular_lines(ink, black_rows, axis=0) if row_is_black else ink
+        _erase_perpendicular_lines(white_ink, white_black_rows, axis=0)
+        if white_row_has_black
+        else white_ink
     )
     white_rows = _whitespace_centers(ink_for_rows, config)[0]
     white_columns = _whitespace_centers(ink_for_columns, config)[1]
+
     row_centers = [line.position for line in black_rows] if row_is_black else white_rows
     column_centers = (
         [line.position for line in black_columns] if column_is_black else white_columns
@@ -391,18 +471,21 @@ def detect_v6_grid(
             tuple(white_columns),
             row_black_reason,
             column_black_reason,
+            tuple(white_black_rows),
+            tuple(white_black_columns),
         )
         return GridStructure("unavailable", (), ()), diagnostics
+
     rows = _map_centers(
         row_centers,
-        analysis_image.height,
+        black_image.height if row_is_black else analysis_image.height,
         source_region.y1,
         source_region.height,
         include_outer=not row_is_black,
     )
     columns = _map_centers(
         column_centers,
-        analysis_image.width,
+        black_image.width if column_is_black else analysis_image.width,
         source_region.x1,
         source_region.width,
         include_outer=not column_is_black,
@@ -422,6 +505,8 @@ def detect_v6_grid(
         tuple(white_columns),
         f"{row_black_reason}；{row_cell_reason}",
         f"{column_black_reason}；{column_cell_reason}",
+        tuple(white_black_rows),
+        tuple(white_black_columns),
     )
     if len(rows) < 2 or len(columns) < 2 or not row_cells_ok or not column_cells_ok:
         return GridStructure("unavailable", (), ()), diagnostics

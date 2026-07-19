@@ -312,10 +312,12 @@ class TablePipeline:
     def _analyze_grid(
         self, image_path: Path, region: Box, region_index: int, image_dir: Path
     ) -> GridStructure:
-        """从原图区域生成受控尺寸分析图，再把网格坐标映射回原图。"""
+        """用 20% 图找白带、50% 图找黑线，再把边界映射回原图。"""
 
         analysis_dir = image_dir / "grid_analysis"
         analysis_path = analysis_dir / f"region_{region_index:03d}.png"
+        black_analysis = None
+        black_analysis_path = analysis_dir / f"region_{region_index:03d}_black_50.png"
         if isinstance(self.detector, InkTableDetector):
             scale = self.config.table_analysis_scale
         else:
@@ -328,7 +330,29 @@ class TablePipeline:
             analysis = source.convert("RGB").copy()
         diagnostics = None
         if isinstance(self.detector, InkTableDetector):
-            grid, diagnostics = detect_v6_grid(analysis, region, self.config)
+            black_longest = round(
+                max(region.width, region.height) * self.config.table_black_line_scale
+            )
+            if black_longest > self.config.table_black_analysis_max_side:
+                raise TablePreprocessingError(
+                    f"{image_path.name} 的表格区域 {region_index} 在 50% 黑线分析时"
+                    f"最长边为 {black_longest}，超过安全上限 "
+                    f"{self.config.table_black_analysis_max_side}"
+                )
+            self.backend.save_crop(
+                image_path,
+                region,
+                black_analysis_path,
+                scale=self.config.table_black_line_scale,
+            )
+            with Image.open(black_analysis_path) as source:
+                black_analysis = source.convert("RGB").copy()
+            grid, diagnostics = detect_v6_grid(
+                analysis,
+                region,
+                self.config,
+                black_analysis_image=black_analysis,
+            )
         else:
             grid = detect_grid_structure(analysis, region, self.config)
         overlay = analysis.copy()
@@ -343,10 +367,72 @@ class TablePipeline:
         draw.text((8, 8), grid.source, fill=color)
         overlay.save(analysis_dir / f"region_{region_index:03d}_boundaries.png")
         if diagnostics is not None:
+            # 同时保存旧 20% 黑线候选，确保这一轮可以直接做逐像素对照。
+            old_black_overlay = analysis.copy()
+            old_black_draw = ImageDraw.Draw(old_black_overlay)
+            for line in diagnostics.black_rows_at_whitespace_scale:
+                old_black_draw.line(
+                    (line.start, line.position, line.end, line.position),
+                    fill=(255, 0, 0),
+                    width=2,
+                )
+            for line in diagnostics.black_columns_at_whitespace_scale:
+                old_black_draw.line(
+                    (line.position, line.start, line.position, line.end),
+                    fill=(0, 80, 255),
+                    width=2,
+                )
+            for boundary in grid.row_boundaries[1:-1]:
+                y = round((boundary - region.y1) * analysis.height / region.height)
+                old_black_draw.line(
+                    (0, y, analysis.width, y), fill=(0, 180, 0), width=2
+                )
+            for boundary in grid.column_boundaries[1:-1]:
+                x = round((boundary - region.x1) * analysis.width / region.width)
+                old_black_draw.line(
+                    (x, 0, x, analysis.height), fill=(0, 180, 0), width=2
+                )
+            old_black_overlay.save(
+                analysis_dir / f"region_{region_index:03d}_black_20_candidates.png"
+            )
+            # 50% 图单独画出所有黑线候选，再叠加最终采用的物理边界。
+            black_overlay = black_analysis.copy()
+            black_draw = ImageDraw.Draw(black_overlay)
+            for line in diagnostics.black_rows:
+                black_draw.line(
+                    (line.start, line.position, line.end, line.position),
+                    fill=(255, 0, 0),
+                    width=2,
+                )
+            for line in diagnostics.black_columns:
+                black_draw.line(
+                    (line.position, line.start, line.position, line.end),
+                    fill=(0, 80, 255),
+                    width=2,
+                )
+            for boundary in grid.row_boundaries[1:-1]:
+                y = round(
+                    (boundary - region.y1) * black_analysis.height / region.height
+                )
+                black_draw.line(
+                    (0, y, black_analysis.width, y), fill=(0, 180, 0), width=2
+                )
+            for boundary in grid.column_boundaries[1:-1]:
+                x = round((boundary - region.x1) * black_analysis.width / region.width)
+                black_draw.line(
+                    (x, 0, x, black_analysis.height), fill=(0, 180, 0), width=2
+                )
+            black_overlay.save(
+                analysis_dir / f"region_{region_index:03d}_black_50_candidates.png"
+            )
             diagnostic_data = diagnostics.to_dict()
             diagnostic_data.update(
                 {
                     "analysis_size": list(analysis.size),
+                    "whitespace_analysis_size": list(analysis.size),
+                    "black_analysis_size": list(black_analysis.size),
+                    "whitespace_analysis_path": str(analysis_path.resolve()),
+                    "black_analysis_path": str(black_analysis_path.resolve()),
                     "source_region": region.to_dict(),
                     "grid": grid.to_dict(),
                 }
