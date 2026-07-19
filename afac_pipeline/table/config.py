@@ -78,8 +78,9 @@ class TableConfig:
     repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
     # 图片尺寸能装下，不代表几千个单元格也能一次写完。
-    # 280 格会拆开已知会截断的 304 格复杂表，又比 240 格少很多请求。
-    max_logical_cells_per_tile: int = 280
+    # 官方 API 对接近 280 格的块识别不稳定；正式值减半到 140 格，
+    # 同时保留 80 格优选下限，避免切出大量没有意义的小碎片。
+    max_logical_cells_per_tile: int = 140
     # 这是规划优选目标，不是硬限制；整张小表仍可少于 80 格。
     preferred_min_logical_cells_per_tile: int = 80
     # 极端细长块即使格子不多，也继续沿长边拆分以保留表格语义。
@@ -88,7 +89,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v17-top-context-content-crop"
+    pipeline_version: str = "table-v18-api-140-cell-tiles"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:

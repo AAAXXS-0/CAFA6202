@@ -180,7 +180,7 @@ def plan_grid_tiles(
     max_side: int,
     repeat_header_rows: int,
     repeat_stub_columns: int,
-    max_logical_cells_per_tile: int = 280,
+    max_logical_cells_per_tile: int = 140,
     preferred_min_logical_cells_per_tile: int = 80,
     max_tile_aspect_ratio: float = 8.0,
 ) -> list[TilePlan]:

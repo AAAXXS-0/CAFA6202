@@ -81,7 +81,7 @@ class TableGridTest(unittest.TestCase):
         self.assertTrue(all(plan.output_width <= 3900 for plan in plans))
 
     def test_default_output_budget_matches_firered_safe_limit(self) -> None:
-        self.assertEqual(TableConfig().max_logical_cells_per_tile, 280)
+        self.assertEqual(TableConfig().max_logical_cells_per_tile, 140)
         boundaries = tuple(range(0, 1801, 100))
         plans = plan_grid_tiles(
             Box(0, 0, 1800, 1800),
@@ -97,7 +97,7 @@ class TableGridTest(unittest.TestCase):
             all(
                 (plan.logical_row_end - plan.logical_row_start)
                 * (plan.logical_column_end - plan.logical_column_start)
-                <= 280
+                <= 140
                 for plan in plans
             )
         )
@@ -121,7 +121,7 @@ class TableGridTest(unittest.TestCase):
             )
             for plan in plans
         ]
-        self.assertEqual(shapes, [(23, 12), (23, 12)])
+        self.assertEqual(shapes, [(23, 6), (23, 6), (23, 6), (23, 6)])
 
     def test_extreme_aspect_ratio_is_split_even_below_cell_budget(self) -> None:
         rows = tuple(round(index * 130 / 8) for index in range(9))
