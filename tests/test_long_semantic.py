@@ -12,6 +12,9 @@ from afac_pipeline.long.步骤005_大模型请求打包 import (
     RecognitionPack,
     _split_range_safely,
     build_semantic_recognition_packs,
+    normalize_markdown_heading_levels,
+    repair_pack_heading_levels,
+    strip_backend_prompt_echo,
     strip_repeated_context_headings,
 )
 
@@ -290,6 +293,147 @@ class LongSemanticTest(unittest.TestCase):
             total = pack.source_box.height + sum(box.height for box in pack.context_boxes)
             total += config.semantic_context_gap * len(pack.context_boxes)
             self.assertLessEqual(total, config.max_vlm_height)
+
+    def test_backend_prompt_echo_is_removed_without_deleting_document(self) -> None:
+        raw = (
+            "# Markdown Parsing Task\n\n"
+            "Extract all the text content of the document image and convert it to Markdown.\n\n"
+            "## Requirements\n\n"
+            "- Convert tables in the doc to HTML format\n\n"
+            "- Convert all the text content in human reading order.\n\n"
+            "## 1 总则\n\n正文"
+        )
+        self.assertEqual(
+            strip_backend_prompt_echo(raw),
+            "## 1 总则\n\n正文",
+        )
+        self.assertEqual(
+            strip_backend_prompt_echo(
+                "# Markdown Parsing Task\n\n"
+                "Extract all the text content of the document image and convert it to Markdown."
+            ),
+            "",
+        )
+
+    def test_manifest_repairs_plain_headings_and_deduplicates_context(self) -> None:
+        first = RecognitionPack(
+            "p0",
+            Box(0, 0, 600, 1000),
+            (),
+            (),
+            (
+                {"heading_id": "h2", "level": 2, "role": "semantic_h2", "source": "body"},
+                {"heading_id": "h3a", "level": 3, "role": "semantic_h3_candidate", "source": "body"},
+                {"heading_id": "h3b", "level": 3, "role": "semantic_h3_candidate", "source": "body"},
+            ),
+            "p0.png",
+            visible_heading_ids=("h2", "h3a", "h3b"),
+        )
+        repaired = repair_pack_heading_levels(
+            normalize_markdown_heading_levels(
+                "8 释义\n\n一、保险人\n\n正文\n\n二、周岁\n\n正文"
+            ),
+            first,
+        )
+        self.assertIn("## 8 释义", repaired)
+        self.assertIn("### 一、保险人", repaired)
+        self.assertIn("### 二、周岁", repaired)
+
+        seen: dict[str, str] = {}
+        strip_repeated_context_headings(repaired, first, seen)
+        second = RecognitionPack(
+            "p1",
+            Box(0, 1000, 600, 2000),
+            (),
+            (),
+            (
+                {"heading_id": "h2", "level": 2, "role": "semantic_h2", "source": "context"},
+                {"heading_id": "h3c", "level": 3, "role": "semantic_h3_candidate", "source": "body"},
+            ),
+            "p1.png",
+            context_heading_ids=("h2",),
+            visible_heading_ids=("h3c",),
+        )
+        continued = repair_pack_heading_levels(
+            "8 释义\n\n三、医院\n\n正文",
+            second,
+        )
+        cleaned = strip_repeated_context_headings(continued, second, seen)
+        self.assertNotIn("8 释义", cleaned)
+        self.assertIn("### 三、医院", cleaned)
+
+    def test_multiline_context_block_allows_one_missing_line(self) -> None:
+        pack = RecognitionPack(
+            "context",
+            Box(0, 0, 600, 1000),
+            (),
+            (),
+            (
+                {"heading_id": "h2", "level": 2, "role": "semantic_h2", "source": "context"},
+                {"heading_id": "h3", "level": 3, "role": "semantic_h3_candidate", "source": "context"},
+            ),
+            "context.png",
+            context_heading_ids=("h2", "h3"),
+        )
+        seen: dict[str, str] = {}
+        first = repair_pack_heading_levels(
+            "2 保障内容\n\n5 保险金申请\n\n7 释义\n\n7.24 康复治疗\n\n正文。",
+            pack,
+        )
+        strip_repeated_context_headings(first, pack, seen)
+        second = repair_pack_heading_levels(
+            "2 保障内容\n\n5 保险金申请\n\n7.24 康复治疗\n\n下一段正文。",
+            pack,
+        )
+        cleaned = strip_repeated_context_headings(second, pack, seen)
+        self.assertNotIn("2 保障内容", cleaned)
+        self.assertNotIn("5 保险金申请", cleaned)
+        self.assertNotIn("7.24 康复治疗", cleaned)
+        self.assertIn("下一段正文", cleaned)
+
+    def test_manifest_restores_toc_and_front_matter_h1(self) -> None:
+        toc_pack = RecognitionPack(
+            "toc",
+            Box(0, 0, 600, 1000),
+            (),
+            (),
+            (
+                {"heading_id": "toc_h1", "level": 1, "role": "semantic_toc", "source": "body"},
+            ),
+            "toc.png",
+            visible_heading_ids=("toc_h1",),
+            semantic_role="table_of_contents",
+        )
+        self.assertTrue(
+            repair_pack_heading_levels("条款目录\n\n1 总则", toc_pack).startswith(
+                "# 条款目录"
+            )
+        )
+
+        title_pack = RecognitionPack(
+            "front",
+            Box(0, 0, 600, 2000),
+            (),
+            (),
+            (
+                {"heading_id": "doc_h1", "level": 1, "role": "semantic_h1", "source": "body"},
+            ),
+            "front.png",
+            visible_heading_ids=("doc_h1",),
+            semantic_role="front_matter",
+        )
+        markdown = (
+            "1 中国人寿保险股份有限公司\n\n"
+            "国寿福享E生养老年金保险(互联网专属)利益条款\n\n"
+            "中国人寿〔2022〕xxxxx号\n\n"
+            "## 1.1 保险合同构成"
+        )
+        repaired = repair_pack_heading_levels(markdown, title_pack)
+        self.assertIn(
+            "# 国寿福享E生养老年金保险(互联网专属)利益条款",
+            repaired,
+        )
+        self.assertIn("## 1.1 保险合同构成", repaired)
 
     def test_repeated_context_heading_is_removed_by_stable_id(self) -> None:
         seen: dict[str, str] = {}

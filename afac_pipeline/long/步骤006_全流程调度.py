@@ -35,6 +35,8 @@ from .步骤005_大模型请求打包 import (
     build_pack_prompt,
     build_semantic_recognition_packs,
     normalize_markdown_heading_levels,
+    repair_pack_heading_levels,
+    strip_backend_prompt_echo,
     strip_repeated_context_headings,
 )
 from .步骤004_自适应安全切块 import (
@@ -50,7 +52,7 @@ from ..common.vlm_client import (
 )
 
 
-LONG_PROMPT_VERSION = "long-markdown-v7-firered-heading-repair"
+LONG_PROMPT_VERSION = "long-markdown-v8-context-prefix-set"
 
 
 def _dump_json(path: Path, value: Any) -> None:
@@ -386,9 +388,18 @@ class LongPipeline:
                         "prompt_version": LONG_PROMPT_VERSION,
                     },
                 )
+            # 原始模型回答单独保留，后续每一步都可以和它对照，避免后处理
+            # 有问题时无法判断到底是模型还是聚合代码造成的。
+            (response_dir / f"{pack.id}_模型原始.md").write_text(
+                markdown,
+                encoding="utf-8",
+            )
+            markdown = strip_backend_prompt_echo(markdown)
+            markdown = normalize_markdown_heading_levels(markdown)
             postprocess_long_pack = getattr(client, "postprocess_long_pack", None)
             if callable(postprocess_long_pack):
                 markdown = postprocess_long_pack(markdown, pack)
+            markdown = repair_pack_heading_levels(markdown, pack)
             (response_dir / f"{pack.id}.md").write_text(markdown, encoding="utf-8")
             cleaned = strip_repeated_context_headings(
                 markdown,
@@ -427,7 +438,9 @@ class LongPipeline:
                 pack_failures,
             )
 
-        return normalize_markdown_heading_levels(current.strip())
+        # 编号标题已在每个请求块中先做通用校正，再由 manifest 稳定 ID
+        # 覆盖已知层级。这里不能再次全局改写，否则会把“# 1 总则”降成 H2。
+        return current.strip()
 
     def recognize_dataset(
         self,

@@ -579,6 +579,227 @@ def _normalized_heading_text(text: str) -> str:
     return re.sub(r"[\s#：:，,。．.、（）()\-—_]", "", text).lower()
 
 
+def strip_backend_prompt_echo(markdown: str) -> str:
+    """删除官方模型偶尔复述的英文任务说明，保留其后的真实文档。
+
+    这里只识别固定的任务说明句式，不会按保险产品名或测试图片名删文字。
+    若一个空白小块只返回了任务说明，清理后的空字符串会被聚合层自然跳过。
+    """
+
+    lines = markdown.strip().splitlines()
+    if not lines or not re.fullmatch(
+        r"#{1,2}\s+Markdown\s+Parsing\s+Task",
+        lines[0].strip(),
+        re.IGNORECASE,
+    ):
+        return markdown.strip()
+
+    known_prefixes = (
+        "extract all the text content",
+        "convert tables",
+        "convert all the text content",
+        "ignore figures",
+        "sort all text content",
+        "sort all the text content",
+    )
+    index = 1
+    while index < len(lines):
+        value = lines[index].strip()
+        lowered = value.lstrip("-* ").lower()
+        if not value or re.fullmatch(
+            r"#{1,3}\s+requirements", value, re.IGNORECASE
+        ):
+            index += 1
+            continue
+        if any(lowered.startswith(prefix) for prefix in known_prefixes):
+            index += 1
+            continue
+        break
+    return "\n".join(lines[index:]).strip()
+
+
+def _heading_line_text(line: str) -> str:
+    match = re.match(r"^#{1,6}\s+(.+?)\s*$", line.strip())
+    return match.group(1).strip() if match else line.strip()
+
+
+def _force_heading_level(lines: list[str], index: int, level: int) -> None:
+    text = _heading_line_text(lines[index])
+    lines[index] = f"{'#' * level} {text}"
+
+
+def _ordered_pack_hints(
+    pack: RecognitionPack,
+) -> tuple[list[tuple[str, int, str]], list[tuple[str, int, str]]]:
+    """按稳定 ID 取出上下文标题和正文可见标题。"""
+
+    hint_by_id: dict[str, tuple[int, str]] = {}
+    for raw in pack.heading_hints:
+        heading_id = str(raw.get("heading_id", ""))
+        level = int(raw.get("level", 0))
+        if heading_id and 1 <= level <= 6 and heading_id not in hint_by_id:
+            hint_by_id[heading_id] = (level, str(raw.get("role", "")))
+
+    def collect(ids: tuple[str, ...]) -> list[tuple[str, int, str]]:
+        result: list[tuple[str, int, str]] = []
+        for heading_id in ids:
+            value = hint_by_id.get(heading_id)
+            if value is not None:
+                result.append((heading_id, value[0], value[1]))
+        return result
+
+    return collect(pack.context_heading_ids), collect(pack.visible_heading_ids)
+
+
+def _is_short_plain_heading(text: str) -> bool:
+    value = text.strip()
+    return bool(
+        value
+        and len(value) <= 100
+        and not value.startswith(("<", "|", chr(96) * 3))
+        and value[-1:] not in "。；;，,"
+    )
+
+
+def _plain_level_matches(text: str, expected_level: int) -> bool:
+    observed = _numbered_heading_level(text)
+    if observed == expected_level:
+        return True
+    # 保险释义常用“一、保险人”，在 H2 章节下实际是 H3。
+    return expected_level == 3 and bool(
+        re.match(r"^[一二三四五六七八九十百]+[、．.]", text.strip())
+    )
+
+
+def _looks_like_metadata_or_instruction(text: str) -> bool:
+    value = text.strip()
+    return bool(
+        re.search(r"注册|备案|编号|扫描|查询|验证|以下简称", value)
+        or re.match(r"^(注意|为了|请(?:仔细|扫描|查询|阅读))", value)
+        or re.fullmatch(r"[（(].*[）)]", value)
+        or re.search(r"〔[^〕]+〕.*号$", value)
+    )
+
+
+def _pick_h1_candidate(lines: list[str], used: set[int]) -> int | None:
+    """在第一个正文小标题前，保守寻找文档主标题行。"""
+
+    limit = min(len(lines), 48)
+    for index, line in enumerate(lines[:limit]):
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line.strip())
+        if match and (_numbered_heading_level(match.group(1)) or 0) >= 3:
+            limit = index
+            break
+
+    candidates: list[tuple[int, int, int]] = []
+    for index, line in enumerate(lines[:limit]):
+        if index in used:
+            continue
+        text = _heading_line_text(line)
+        if not _is_short_plain_heading(text):
+            continue
+        if _looks_like_metadata_or_instruction(text):
+            continue
+        score = 0
+        if re.match(r"^#{1,6}\s+", line.strip()):
+            score += 5
+        if "条款" in text:
+            score += 4
+        if "保险" in text:
+            score += 2
+        next_text = ""
+        for following in lines[index + 1 : min(limit, index + 5)]:
+            if following.strip():
+                next_text = _heading_line_text(following)
+                break
+        if re.search(r"注册|备案|编号|版|〔[^〕]+〕.*号$", next_text):
+            score += 5
+        if score > 0:
+            candidates.append((score, len(text), -index))
+    if not candidates:
+        return None
+    _, _, negative_index = max(candidates)
+    return -negative_index
+
+
+def repair_pack_heading_levels(markdown: str, pack: RecognitionPack) -> str:
+    """用请求包中的稳定标题 ID 校准层级，并恢复复制标题的普通文本形式。
+
+    只处理 manifest 明确列出的标题预算，不会把全文所有编号或短句提升为标题。
+    """
+
+    if not markdown.strip() or not pack.heading_hints:
+        return markdown.strip()
+    lines = markdown.strip().splitlines()
+    context_hints, visible_hints = _ordered_pack_hints(pack)
+    used: set[int] = set()
+    cursor = 0
+
+    # 复制到图片顶部的 H2/H3 必然位于响应开头；即使模型没加井号，也可按
+    # context_heading_ids 恢复，从而让后续稳定 ID 去重真正生效。
+    for _, level, _ in context_hints:
+        chosen: int | None = None
+        for index in range(cursor, min(len(lines), cursor + 24)):
+            text = _heading_line_text(lines[index])
+            if not text:
+                continue
+            if re.match(r"^#{1,6}\s+", lines[index].strip()) or _is_short_plain_heading(text):
+                chosen = index
+                break
+        if chosen is None:
+            break
+        _force_heading_level(lines, chosen, level)
+        used.add(chosen)
+        cursor = chosen + 1
+
+    # 目录标题位置稳定且文字特征明确；目录条目本身仍保持普通文本或表格。
+    for heading_id, level, role in visible_hints:
+        if level != 1 or "toc" not in role.lower():
+            continue
+        for index, line in enumerate(lines[:40]):
+            text = _heading_line_text(line)
+            if index not in used and "目录" in text and len(text) <= 40:
+                _force_heading_level(lines, index, level)
+                used.add(index)
+                break
+
+    # 正文主标题通常没有编号。只在 manifest 明确给出 H1 时，从正文小标题前
+    # 选择带文档标题特征的短行；找不到可靠候选则保持原样，不强行猜测。
+    h1_hints = [
+        item for item in visible_hints
+        if item[1] == 1 and "toc" not in item[2].lower()
+    ]
+    for _ in h1_hints:
+        chosen = _pick_h1_candidate(lines, used)
+        if chosen is None:
+            break
+        _force_heading_level(lines, chosen, 1)
+        used.add(chosen)
+
+    body_hints = [item for item in visible_hints if item[1] != 1]
+    search_from = 0
+    for _, expected_level, _ in body_hints:
+        chosen = None
+        for index in range(search_from, len(lines)):
+            if index in used:
+                continue
+            text = _heading_line_text(lines[index])
+            if not text or not _is_short_plain_heading(text):
+                continue
+            if _plain_level_matches(text, expected_level):
+                chosen = index
+                break
+        if chosen is None:
+            # manifest 与模型编号形态不一致时，宁可保留模型层级，也不盲目
+            # 把一个正常 H2/H3 强行降成更深标题。
+            continue
+        _force_heading_level(lines, chosen, expected_level)
+        used.add(chosen)
+        search_from = chosen + 1
+
+    return "\n".join(lines).strip()
+
+
 def strip_repeated_context_headings(
     markdown: str,
     pack: RecognitionPack,
@@ -587,12 +808,44 @@ def strip_repeated_context_headings(
     """按稳定标题 ID 删除续块重复祖先标题；文字相似度只作为安全校验。"""
 
     lines = markdown.strip().splitlines()
+    remove: set[int] = set()
+
+    # 一个复制标题框偶尔会被模型读成多行，行数不一定等于稳定标题 ID 数。
+    # 因此额外按 context ID 组合记录“开头短行块”；同一组合再次出现时，
+    # 删除逐行相同的最长前缀。这样既能去掉普通文本形式的祖先标题，也不会
+    # 对正文中稍后出现的同名短句做全局删除。
+    if pack.context_heading_ids:
+        prefix_rows: list[tuple[int, str]] = []
+        for index, line in enumerate(lines):
+            text = _heading_line_text(line)
+            if not text:
+                continue
+            if not _is_short_plain_heading(text):
+                break
+            prefix_rows.append((index, _normalized_heading_text(text)))
+            if len(prefix_rows) >= 12:
+                break
+        block_key = "__context_block__:" + "|".join(pack.context_heading_ids)
+        previous_block = seen_heading_text.get(block_key)
+        if previous_block is None:
+            seen_heading_text[block_key] = "\x1f".join(
+                signature for _, signature in prefix_rows
+            )
+        else:
+            previous_signatures = set(previous_block.split("\x1f"))
+            for line_index, signature in prefix_rows:
+                # 同一复制标题框有时会漏识别其中一行，所以不能只做
+                # 严格逐位比较；但仍只检查响应最开头的连续短行。
+                if not signature or signature not in previous_signatures:
+                    break
+                remove.add(line_index)
+
     heading_rows = [
         (index, match.group(2).strip())
         for index, line in enumerate(lines)
-        if (match := re.match(r"^(#{1,6})\s+(.+?)\s*$", line))
+        if index not in remove
+        and (match := re.match(r"^(#{1,6})\s+(.+?)\s*$", line))
     ]
-    remove: set[int] = set()
     for position, heading_id in enumerate(pack.context_heading_ids):
         if position >= len(heading_rows):
             break
@@ -608,7 +861,7 @@ def strip_repeated_context_headings(
 
     remaining_heading_rows = [item for item in heading_rows if item[0] not in remove]
     # 当前正文中真正可见的标题按原图顺序记录，供后续上下文条去重。
-    offset = len(pack.context_heading_ids) - len(remove)
+    offset = max(0, len(pack.context_heading_ids) - len(remove))
     for position, heading_id in enumerate(pack.visible_heading_ids):
         row_index = offset + position
         if row_index >= len(remaining_heading_rows):
@@ -633,6 +886,10 @@ def _numbered_heading_level(text: str) -> int | None:
         if "." not in number and int(number) > 99:
             return None
         return min(5, number.count(".") + 2)
+    if re.match(r"^第[一二三四五六七八九十百0-9]+章", value):
+        return 2
+    if re.match(r"^第[一二三四五六七八九十百0-9]+[节条]", value):
+        return 3
     if re.match(r"^[一二三四五六七八九十百]+[、．.]", value):
         return 2
     if re.match(r"^[（(][一二三四五六七八九十百]+[）)]", value):
