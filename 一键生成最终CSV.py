@@ -36,6 +36,10 @@ from afac_pipeline.table import TableConfig, TablePipeline
 最大并行数 = 32
 默认请求超时秒数 = 600
 
+# Python 的 csv 模块默认只允许单个字段约 128 KiB。图表识别结果保存的是完整
+# HTML，大表很容易超过这个值；这里只放宽读取限制，不会修改或截断识别内容。
+csv.field_size_limit(sys.maxsize)
+
 
 def 检查固定文件() -> None:
     """在耗时处理前检查输入、模型、凭据说明和模板是否齐全。"""
