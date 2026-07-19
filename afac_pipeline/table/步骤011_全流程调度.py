@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -31,7 +30,6 @@ from .步骤006_逻辑网格切块 import plan_grid_tiles
 from .步骤009_HTML表格软对齐 import (
     HtmlTableMergeError,
     merge_logical_tiles,
-    normalize_table_response,
     normalize_table_response_soft,
     render_empty_table,
 )
@@ -53,7 +51,7 @@ from ..common.vlm_client import (
 )
 
 
-PROMPT_VERSION = "table-structured-html-v4-empty-fallback"
+PROMPT_VERSION = "table-physical-grid-v5-quality-gate"
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -85,8 +83,14 @@ def build_table_prompt(tile: TilePlan) -> str:
     """让每个切片的输出尽量适合确定性矩阵合并。"""
 
     if tile.tiling_mode == "logical_grid":
-        visible_rows = tile.header_context_rows + tile.logical_row_end - tile.logical_row_start
-        visible_columns = tile.stub_context_columns + tile.logical_column_end - tile.logical_column_start
+        visible_rows = (
+            tile.header_context_rows + tile.logical_row_end - tile.logical_row_start
+        )
+        visible_columns = (
+            tile.stub_context_columns
+            + tile.logical_column_end
+            - tile.logical_column_start
+        )
         return f"""你正在解析金融文档中的表格切片。
 
 该图片应包含 {visible_rows} 个逻辑行、{visible_columns} 个逻辑列。顶部可能重复表头，左侧可能重复行名列，这些是有意保留的上下文。
@@ -120,9 +124,7 @@ def _logical_tile_shape(tile: TilePlan) -> tuple[int, int]:
 
     rows = tile.header_context_rows + tile.logical_row_end - tile.logical_row_start
     columns = (
-        tile.stub_context_columns
-        + tile.logical_column_end
-        - tile.logical_column_start
+        tile.stub_context_columns + tile.logical_column_end - tile.logical_column_start
     )
     return rows, columns
 
@@ -133,9 +135,17 @@ def _mask_has_no_text(ink_mask: list[list[bool]] | None) -> bool:
     ``None`` 表示没有可靠的逻辑网格信息，不能擅自当作空表。
     """
 
-    return ink_mask is not None and bool(ink_mask) and all(
-        not has_text for row in ink_mask for has_text in row
+    return (
+        ink_mask is not None
+        and bool(ink_mask)
+        and all(not has_text for row in ink_mask for has_text in row)
     )
+
+
+def _mask_has_any_text(ink_mask: list[list[bool]] | None) -> bool:
+    """墨迹 bool 是否认为至少一个物理格内存在文字。"""
+
+    return bool(ink_mask and any(has_text for row in ink_mask for has_text in row))
 
 
 def _empty_tile_html(tile: TilePlan) -> str:
@@ -159,7 +169,9 @@ class TablePipeline:
         self._last_v6_regions: V6RegionResult | None = None
 
     @staticmethod
-    def _map_preview_box(box: Box, preview_width: int, preview_height: int, meta: ImageMeta) -> Box:
+    def _map_preview_box(
+        box: Box, preview_width: int, preview_height: int, meta: ImageMeta
+    ) -> Box:
         """把预览图坐标精确映射回原图坐标。"""
 
         scale_x = meta.width / preview_width
@@ -178,7 +190,9 @@ class TablePipeline:
             self._last_v6_regions = detect_v6_regions(preview, self.config)
             return [
                 DetectedBox(
-                    self._map_preview_box(item.box, preview.width, preview.height, meta),
+                    self._map_preview_box(
+                        item.box, preview.width, preview.height, meta
+                    ),
                     label=item.label,
                     confidence=item.confidence,
                     source=item.source,
@@ -216,7 +230,9 @@ class TablePipeline:
 
         preview_path = image_dir / "preview.png"
         if isinstance(self.detector, InkTableDetector):
-            longest = round(max(meta.width, meta.height) * self.config.table_analysis_scale)
+            longest = round(
+                max(meta.width, meta.height) * self.config.table_analysis_scale
+            )
             if longest > self.config.table_analysis_max_side:
                 raise RuntimeError(
                     f"{image_path.name} 固定缩放后的最长边为 {longest}，超过安全上限 "
@@ -257,11 +273,19 @@ class TablePipeline:
             x2 = round(band.end * preview.width / density.shape[1])
             draw.rectangle((x1, 0, x2, preview.height), fill=(255, 0, 0, 65))
         for index, box in enumerate(result.split_boxes):
-            draw.rectangle((box.x1, box.y1, box.x2, box.y2), outline=(0, 80, 255, 255), width=3)
-            draw.text((box.x1 + 4, box.y1 + 4), f"split-{index + 1}", fill=(0, 80, 255, 255))
+            draw.rectangle(
+                (box.x1, box.y1, box.x2, box.y2), outline=(0, 80, 255, 255), width=3
+            )
+            draw.text(
+                (box.x1 + 4, box.y1 + 4), f"split-{index + 1}", fill=(0, 80, 255, 255)
+            )
         for index, box in enumerate(result.analysis_boxes):
-            draw.rectangle((box.x1, box.y1, box.x2, box.y2), outline=(160, 0, 255, 255), width=3)
-            draw.text((box.x1 + 4, box.y1 + 22), f"table-{index + 1}", fill=(160, 0, 255, 255))
+            draw.rectangle(
+                (box.x1, box.y1, box.x2, box.y2), outline=(160, 0, 255, 255), width=3
+            )
+            draw.text(
+                (box.x1 + 4, box.y1 + 22), f"table-{index + 1}", fill=(160, 0, 255, 255)
+            )
         overlay.save(output_dir / "split_and_analysis_boxes.png")
 
     @staticmethod
@@ -293,7 +317,8 @@ class TablePipeline:
             scale = self.config.table_analysis_scale
         else:
             scale = min(
-                1.0, self.config.grid_analysis_max_side / max(region.width, region.height)
+                1.0,
+                self.config.grid_analysis_max_side / max(region.width, region.height),
             )
         self.backend.save_crop(image_path, region, analysis_path, scale=scale)
         with Image.open(analysis_path) as source:
@@ -313,9 +338,7 @@ class TablePipeline:
             x = round((boundary - region.x1) * analysis.width / region.width)
             draw.line((x, 0, x, analysis.height), fill=color, width=2)
         draw.text((8, 8), grid.source, fill=color)
-        overlay.save(
-            analysis_dir / f"region_{region_index:03d}_boundaries.png"
-        )
+        overlay.save(analysis_dir / f"region_{region_index:03d}_boundaries.png")
         if diagnostics is not None:
             diagnostic_data = diagnostics.to_dict()
             diagnostic_data.update(
@@ -325,13 +348,19 @@ class TablePipeline:
                     "grid": grid.to_dict(),
                 }
             )
-            _json_dump(analysis_dir / f"region_{region_index:03d}_diagnostics.json", diagnostic_data)
+            _json_dump(
+                analysis_dir / f"region_{region_index:03d}_diagnostics.json",
+                diagnostic_data,
+            )
         return grid
 
-
     def _save_tile(
-        self, image_path: Path, output_path: Path, plan: TilePlan,
-        row_boundaries: tuple[int, ...], column_boundaries: tuple[int, ...],
+        self,
+        image_path: Path,
+        output_path: Path,
+        plan: TilePlan,
+        row_boundaries: tuple[int, ...],
+        column_boundaries: tuple[int, ...],
     ) -> None:
         """保存普通裁片，或拼出“左上角 + 表头 + 行名列 + 主体”图片。"""
 
@@ -357,17 +386,36 @@ class TablePipeline:
 
             body = crop("body", plan.source_box)
             top_height = row_boundaries[plan.header_context_rows] - row_boundaries[0]
-            left_width = column_boundaries[plan.stub_context_columns] - column_boundaries[0]
-            canvas = Image.new("RGB", (body.width + left_width, body.height + top_height), "white")
+            left_width = (
+                column_boundaries[plan.stub_context_columns] - column_boundaries[0]
+            )
+            canvas = Image.new(
+                "RGB", (body.width + left_width, body.height + top_height), "white"
+            )
             canvas.paste(body, (left_width, top_height))
             if top_height:
-                top_box = Box(plan.source_box.x1, row_boundaries[0], plan.source_box.x2, row_boundaries[plan.header_context_rows])
+                top_box = Box(
+                    plan.source_box.x1,
+                    row_boundaries[0],
+                    plan.source_box.x2,
+                    row_boundaries[plan.header_context_rows],
+                )
                 canvas.paste(crop("top", top_box), (left_width, 0))
             if left_width:
-                left_box = Box(column_boundaries[0], plan.source_box.y1, column_boundaries[plan.stub_context_columns], plan.source_box.y2)
+                left_box = Box(
+                    column_boundaries[0],
+                    plan.source_box.y1,
+                    column_boundaries[plan.stub_context_columns],
+                    plan.source_box.y2,
+                )
                 canvas.paste(crop("left", left_box), (0, top_height))
             if top_height and left_width:
-                corner_box = Box(column_boundaries[0], row_boundaries[0], column_boundaries[plan.stub_context_columns], row_boundaries[plan.header_context_rows])
+                corner_box = Box(
+                    column_boundaries[0],
+                    row_boundaries[0],
+                    column_boundaries[plan.stub_context_columns],
+                    row_boundaries[plan.header_context_rows],
+                )
                 canvas.paste(crop("corner", corner_box), (0, 0))
             if canvas.size != (plan.output_width, plan.output_height):
                 canvas = canvas.resize(
@@ -376,7 +424,6 @@ class TablePipeline:
                 )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             canvas.save(output_path, format="PNG", optimize=True)
-
 
     @staticmethod
     def _preview_box(box: Box, preview: Image.Image, meta: ImageMeta) -> Box:
@@ -413,10 +460,18 @@ class TablePipeline:
             # 大模型负责识别的主体范围。重复表头/行名列只出现在切块图片中。
             for boundary in region.row_boundaries[1:-1]:
                 y = round(boundary * preview.height / meta.height)
-                draw.line((region_box.x1, y, region_box.x2, y), fill=(0, 170, 255, 100), width=1)
+                draw.line(
+                    (region_box.x1, y, region_box.x2, y),
+                    fill=(0, 170, 255, 100),
+                    width=1,
+                )
             for boundary in region.column_boundaries[1:-1]:
                 x = round(boundary * preview.width / meta.width)
-                draw.line((x, region_box.y1, x, region_box.y2), fill=(0, 170, 255, 100), width=1)
+                draw.line(
+                    (x, region_box.y1, x, region_box.y2),
+                    fill=(0, 170, 255, 100),
+                    width=1,
+                )
             for plan in region.tiles:
                 all_plans.append(plan)
                 tile_box = self._preview_box(plan.source_box, preview, meta)
@@ -444,7 +499,9 @@ class TablePipeline:
             top = (index // columns) * card_height
             with Image.open(tiles_dir / plan.file_name) as source:
                 tile = source.convert("RGB").copy()
-            tile.thumbnail((card_width - 20, image_height - 10), Image.Resampling.LANCZOS)
+            tile.thumbnail(
+                (card_width - 20, image_height - 10), Image.Resampling.LANCZOS
+            )
             x = left + (card_width - tile.width) // 2
             y = top + 5 + (image_height - tile.height) // 2
             sheet.paste(tile, (x, y))
@@ -472,8 +529,10 @@ class TablePipeline:
 
     def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
         # 配置摘要进入目录名，切换检测/切片参数后不会与旧 tiles 混在一起。
-        image_dir = self.work_dir / "prepared" / (
-            f"{image_path.stem}_{image_sha256[:12]}_{self.config.digest()[:8]}"
+        image_dir = (
+            self.work_dir
+            / "prepared"
+            / (f"{image_path.stem}_{image_sha256[:12]}_{self.config.digest()[:8]}")
         )
         tiles_dir = image_dir / "tiles"
         image_dir.mkdir(parents=True, exist_ok=True)
@@ -511,9 +570,14 @@ class TablePipeline:
                     grid.row_boundaries[-1],
                 )
                 plans = plan_grid_tiles(
-                    region_box, region_index, grid.row_boundaries, grid.column_boundaries,
-                    self.config.max_vlm_side, self.config.single_tile_min_scale,
-                    self.config.repeat_header_rows, self.config.repeat_stub_columns,
+                    region_box,
+                    region_index,
+                    grid.row_boundaries,
+                    grid.column_boundaries,
+                    self.config.max_vlm_side,
+                    self.config.single_tile_min_scale,
+                    self.config.repeat_header_rows,
+                    self.config.repeat_stub_columns,
                     self.config.max_logical_cells_per_tile,
                     self.config.preferred_min_logical_cells_per_tile,
                     self.config.max_tile_aspect_ratio,
@@ -522,21 +586,25 @@ class TablePipeline:
                 # 保留“检测到了边界但存在超大单元格”的原因，避免清单把它
                 # 与“完全没有发现边界”混为一谈。
                 fallback_source = (
-                    f"{grid.source}-unplannable"
-                    if grid.available
-                    else "unavailable"
+                    f"{grid.source}-unplannable" if grid.available else "unavailable"
                 )
                 grid = GridStructure(
                     fallback_source, grid.row_boundaries, grid.column_boundaries
                 )
                 plans = plan_region_tiles(
-                    region_box, region_index, self.config.max_vlm_side,
-                    self.config.tile_overlap, self.config.single_tile_min_scale,
+                    region_box,
+                    region_index,
+                    self.config.max_vlm_side,
+                    self.config.tile_overlap,
+                    self.config.single_tile_min_scale,
                 )
             for plan in plans:
                 self._save_tile(
-                    image_path, tiles_dir / plan.file_name, plan,
-                    grid.row_boundaries, grid.column_boundaries,
+                    image_path,
+                    tiles_dir / plan.file_name,
+                    plan,
+                    grid.row_boundaries,
+                    grid.column_boundaries,
                 )
             regions.append(
                 PreparedRegion(
@@ -550,9 +618,7 @@ class TablePipeline:
                 )
             )
 
-        audit = self._save_tile_audit(
-            preview, meta, regions, tiles_dir, image_dir
-        )
+        audit = self._save_tile_audit(preview, meta, regions, tiles_dir, image_dir)
         manifest = {
             "schema_version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -633,7 +699,6 @@ class TablePipeline:
             tiling_mode=str(raw.get("tiling_mode", "pixel_overlap")),
         )
 
-
     def _tile_ink_mask(
         self,
         gray: np.ndarray,
@@ -668,18 +733,14 @@ class TablePipeline:
                 ink_pixels = int(
                     np.count_nonzero(inner < self.config.grid_white_threshold)
                 )
-                values.append(
-                    ink_pixels > max(2, round(inner.size * 0.003))
-                )
+                values.append(ink_pixels > max(2, round(inner.size * 0.003)))
             result.append(values)
         return result
 
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         image_info = image_manifest["image"]
-        image_name = str(
-            image_info.get("file_name") or Path(image_info["path"]).name
-        )
+        image_name = str(image_info.get("file_name") or Path(image_info["path"]).name)
         region_markdowns: list[str] = []
         tile_failures: list[dict[str, Any]] = []
         cache_model = _table_cache_model(client)
@@ -693,18 +754,20 @@ class TablePipeline:
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
             plans = [self._tile_from_dict(raw) for raw in region["tiles"]]
-            row_boundaries = [
-                int(value) for value in region.get("row_boundaries", [])
-            ]
+            row_boundaries = [int(value) for value in region.get("row_boundaries", [])]
             column_boundaries = [
                 int(value) for value in region.get("column_boundaries", [])
             ]
-            tile_ink_masks = {
-                (plan.row_index, plan.column_index): self._tile_ink_mask(
-                    source_gray, row_boundaries, column_boundaries, plan
-                )
-                for plan in plans
-            } if row_boundaries and column_boundaries else {}
+            tile_ink_masks = (
+                {
+                    (plan.row_index, plan.column_index): self._tile_ink_mask(
+                        source_gray, row_boundaries, column_boundaries, plan
+                    )
+                    for plan in plans
+                }
+                if row_boundaries and column_boundaries
+                else {}
+            )
             response_dir = manifest_path.parent / "responses"
             response_dir.mkdir(parents=True, exist_ok=True)
             for raw_tile in region["tiles"]:
@@ -731,8 +794,7 @@ class TablePipeline:
                 ink_mask = tile_ink_masks.get(tile_id)
 
                 if tile.tiling_mode == "logical_grid" and _mask_has_no_text(ink_mask):
-                    # 只看单元格内部；网格线本身不会触发“有文字”。这种纯空表
-                    # 无需让自回归模型生成几百个重复的 <td>，直接保留预处理形状。
+                    # 墨迹 bool 只判断内容是否为空，不改变预处理确定的物理行列。
                     markdown = _empty_tile_html(tile)
                     source = "预处理判空，跳过模型"
                     self.cache.put_tile(
@@ -740,139 +802,265 @@ class TablePipeline:
                         markdown,
                         {
                             **base_metadata,
+                            "response_status": "preprocess-confirmed-empty",
                             "empty_table_fallback": True,
                             "empty_table_reason": "preprocess-no-cell-ink",
                         },
                     )
                 else:
-                    markdown = self.cache.get_tile(cache_key)
-                    source = "缓存"
-                    if markdown is not None and not markdown.strip():
-                        if tile.tiling_mode == "logical_grid":
-                            markdown = _empty_tile_html(tile)
-                            source = "空缓存修复"
+                    markdown: str | None = None
+                    quality_report: dict[str, object] | None = None
+                    cached_entry = self.cache.get_tile_entry(cache_key)
+                    cached = cached_entry[0] if cached_entry else None
+                    cached_metadata = cached_entry[1] if cached_entry else {}
+                    if cached is not None:
+                        if not cached.strip():
+                            # 历史空字符串没有“三次复核”状态，删除后重新识别。
+                            self.cache.delete_tile(cache_key)
+                            print(
+                                f"[图表坏缓存失效] {request_label}："
+                                "历史缓存为空字符串，重新识别。",
+                                flush=True,
+                            )
+                        elif tile.tiling_mode == "logical_grid":
+                            try:
+                                markdown, quality_report = (
+                                    normalize_table_response_soft(
+                                        cached, *_logical_tile_shape(tile), ink_mask
+                                    )
+                                )
+                                if (
+                                    _mask_has_any_text(ink_mask)
+                                    and quality_report["nonempty_cells"] == 0
+                                    and cached_metadata.get("response_status")
+                                    not in {
+                                        "empty-fallback",
+                                        "preprocess-confirmed-empty",
+                                    }
+                                ):
+                                    raise HtmlTableMergeError(
+                                        "历史缓存是全空表，但没有经过三次全空复核"
+                                    )
+                                source = "缓存"
+                            except HtmlTableMergeError as error:
+                                self.cache.delete_tile(cache_key)
+                                print(
+                                    f"[图表坏缓存失效] {request_label}："
+                                    f"{error}；重新识别。",
+                                    flush=True,
+                                )
+                        else:
+                            markdown = cached
+                            source = "缓存"
+
+                    if markdown is None:
+                        # 旧缓存也必须通过当前质量闸门，坏结果不迁移。
+                        for legacy_model in _table_legacy_cache_models(client):
+                            legacy_key = self.cache.tile_key(
+                                image_bytes, prompt, legacy_model
+                            )
+                            legacy_entry = self.cache.get_tile_entry(legacy_key)
+                            candidate = legacy_entry[0] if legacy_entry else None
+                            legacy_metadata = legacy_entry[1] if legacy_entry else {}
+                            if candidate is None or not candidate.strip():
+                                continue
+                            legacy_quality = None
+                            if tile.tiling_mode == "logical_grid":
+                                try:
+                                    candidate, legacy_quality = (
+                                        normalize_table_response_soft(
+                                            candidate,
+                                            *_logical_tile_shape(tile),
+                                            ink_mask,
+                                        )
+                                    )
+                                    if (
+                                        _mask_has_any_text(ink_mask)
+                                        and legacy_quality["nonempty_cells"] == 0
+                                        and legacy_metadata.get("response_status")
+                                        not in {
+                                            "empty-fallback",
+                                            "preprocess-confirmed-empty",
+                                        }
+                                    ):
+                                        continue
+                                except HtmlTableMergeError:
+                                    continue
+                            markdown = candidate
+                            quality_report = legacy_quality
+                            source = "兼容缓存"
                             self.cache.put_tile(
                                 cache_key,
                                 markdown,
                                 {
                                     **base_metadata,
-                                    "empty_table_fallback": True,
-                                    "empty_table_reason": "cached-empty-markdown",
+                                    "response_status": "valid-migrated-cache",
+                                    "migrated_from": legacy_model,
+                                    "quality": legacy_quality,
                                 },
-                            )
-                        else:
-                            # 像素重叠切块没有可靠的逻辑行列数，不能凭空补表。
-                            markdown = None
-
-                    if markdown is None:
-                        # 参数升级后尝试迁移旧成功缓存。这里只检查响应能否解析；
-                        # 行列差异由后面的墨迹软对齐处理并写入 warning，避免把
-                        # 只是省略空行空列的结果再次送进模型。
-                        for legacy_model in _table_legacy_cache_models(client):
-                            legacy_key = self.cache.tile_key(
-                                image_bytes, prompt, legacy_model
-                            )
-                            candidate = self.cache.get_tile(legacy_key)
-                            if candidate is None:
-                                continue
-                            legacy_metadata = {
-                                **base_metadata,
-                                "migrated_from": legacy_model,
-                            }
-                            if not candidate.strip():
-                                if tile.tiling_mode != "logical_grid":
-                                    continue
-                                candidate = _empty_tile_html(tile)
-                                legacy_metadata.update(
-                                    {
-                                        "empty_table_fallback": True,
-                                        "empty_table_reason": "cached-empty-markdown",
-                                    }
-                                )
-                            elif tile.tiling_mode == "logical_grid":
-                                try:
-                                    normalize_table_response(candidate)
-                                except HtmlTableMergeError:
-                                    continue
-                            markdown = candidate
-                            source = "兼容缓存"
-                            self.cache.put_tile(
-                                cache_key, markdown, legacy_metadata
                             )
                             break
 
                     if markdown is None:
-                        source = "API"
                         print(
                             f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
-                            f"{request_label}：请求 API",
+                            f"{request_label}：请求模型",
                             flush=True,
                         )
+                        retry_limit = 3 if tile.tiling_mode == "logical_grid" else 0
                         empty_reason: str | None = None
-                        try:
-                            if isinstance(client, FinixDocClient):
-                                markdown = client.recognize(
-                                    tile_path,
-                                    prompt,
-                                    request_label=request_label,
-                                    empty_retry_limit=min(3, client.max_retries),
-                                    return_empty_after_limit=True,
-                                )
-                            else:
-                                markdown = client.recognize(tile_path, prompt)
-                        except RuntimeError as error:
-                            if (
-                                tile.tiling_mode == "logical_grid"
-                                and "返回了空 Markdown" in str(error)
-                            ):
-                                markdown = _empty_tile_html(tile)
+                        last_error: Exception | None = None
+                        raw_dir = response_dir / "模型原始"
+                        raw_dir.mkdir(parents=True, exist_ok=True)
+                        last_raw_path: Path | None = None
+
+                        for attempt in range(retry_limit + 1):
+                            try:
+                                if isinstance(client, FinixDocClient):
+                                    raw = client.recognize(
+                                        tile_path,
+                                        prompt,
+                                        request_label=request_label,
+                                        empty_retry_limit=min(3, client.max_retries),
+                                        return_empty_after_limit=True,
+                                    )
+                                else:
+                                    raw = client.recognize(tile_path, prompt)
+                            except RuntimeError as error:
+                                # 本地后端用异常表示“正常完成但输出为空”。
+                                if (
+                                    tile.tiling_mode == "logical_grid"
+                                    and "空 Markdown" in str(error)
+                                ):
+                                    raw = ""
+                                else:
+                                    last_error = error
+                                    break
+
+                            last_raw_path = (
+                                raw_dir
+                                / f"{Path(tile.file_name).stem}_attempt_{attempt + 1}.md"
+                            )
+                            last_raw_path.write_text(raw, encoding="utf-8")
+
+                            if not raw.strip():
                                 empty_reason = "model-empty-markdown"
-                                source = "模型空响应，按预处理补空表"
-                            else:
-                                failure = {
-                                    "source_image": image_name,
-                                    "region_index": region["index"],
-                                    "tile_file_name": tile.file_name,
-                                    "error_type": type(error).__name__,
-                                    "error": str(error),
-                                }
-                                tile_failures.append(failure)
-                                completed_tiles += 1
-                                print(
-                                    f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
-                                    f"{request_label}：{error}；继续此图下一块。",
-                                    flush=True,
-                                )
-                                continue
-                        if not markdown.strip():
+                                # 官方客户端内部已经完成三次平方退让。
+                                if isinstance(client, FinixDocClient):
+                                    break
+                                if attempt < retry_limit:
+                                    print(
+                                        f"[图表全空复核 {attempt + 1}/{retry_limit}] "
+                                        f"{request_label}：没有 HTML/Markdown，"
+                                        "再试一次。",
+                                        flush=True,
+                                    )
+                                    continue
+                                break
+
                             if tile.tiling_mode != "logical_grid":
-                                message = (
-                                    "模型返回空结果，且切片没有可靠的预处理行列数"
+                                markdown = raw
+                                source = "模型"
+                                break
+
+                            try:
+                                normalized, candidate_quality = (
+                                    normalize_table_response_soft(
+                                        raw, *_logical_tile_shape(tile), ink_mask
+                                    )
                                 )
-                                failure = {
-                                    "source_image": image_name,
-                                    "region_index": region["index"],
-                                    "tile_file_name": tile.file_name,
-                                    "error_type": "UnrecoverableEmptyTile",
-                                    "error": message,
+                            except HtmlTableMergeError as error:
+                                last_error = error
+                                if attempt < retry_limit:
+                                    print(
+                                        f"[图表内容异常复核 {attempt + 1}/{retry_limit}] "
+                                        f"{request_label}：{error}；换一次请求重试。",
+                                        flush=True,
+                                    )
+                                    continue
+                                break
+
+                            if (
+                                _mask_has_any_text(ink_mask)
+                                and candidate_quality["nonempty_cells"] == 0
+                            ):
+                                # 这可能是墨迹 bool 约 0.1% 的误判，也可能是模型漏识。
+                                empty_reason = "model-empty-table"
+                                last_error = None
+                                if attempt < retry_limit:
+                                    print(
+                                        f"[图表全空复核 {attempt + 1}/{retry_limit}] "
+                                        f"{request_label}：返回全空表但墨迹 bool 有内容，"
+                                        "再试一次。",
+                                        flush=True,
+                                    )
+                                    continue
+                                break
+
+                            markdown = normalized
+                            quality_report = candidate_quality
+                            source = "模型"
+                            empty_reason = None
+                            last_error = None
+                            break
+
+                        if markdown is None and empty_reason is not None:
+                            if tile.tiling_mode == "logical_grid":
+                                markdown = _empty_tile_html(tile)
+                                source = "模型连续全空，按预处理补空表"
+                                rows, columns = _logical_tile_shape(tile)
+                                quality_report = {
+                                    "physical_rows": rows,
+                                    "physical_columns": columns,
+                                    "warnings": [
+                                        "模型复核后仍为全空；保留物理结构并清空内容"
+                                    ],
                                 }
-                                tile_failures.append(failure)
-                                completed_tiles += 1
-                                print(
-                                    f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
-                                    f"{request_label}：{message}；继续此图下一块。",
-                                    flush=True,
+                            else:
+                                last_error = RuntimeError(
+                                    "全空切片没有可靠预处理行列，无法补矩阵"
                                 )
-                                continue
-                            markdown = _empty_tile_html(tile)
-                            empty_reason = "model-empty-markdown"
-                            source = "模型空响应，按预处理补空表"
-                        metadata = dict(base_metadata)
+
+                        if markdown is None:
+                            error = last_error or RuntimeError(
+                                "模型响应未通过图表质量检查"
+                            )
+                            failure = {
+                                "source_image": image_name,
+                                "region_index": region["index"],
+                                "tile_file_name": tile.file_name,
+                                "tile_path": str(tile_path.resolve()),
+                                "raw_response": (
+                                    str(last_raw_path.resolve())
+                                    if last_raw_path
+                                    else None
+                                ),
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            }
+                            tile_failures.append(failure)
+                            completed_tiles += 1
+                            print(
+                                f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
+                                f"{request_label}：{error}；不缓存损坏响应，"
+                                "继续此图下一块。",
+                                flush=True,
+                            )
+                            continue
+
+                        metadata = {
+                            **base_metadata,
+                            "response_status": (
+                                "empty-fallback" if empty_reason else "valid"
+                            ),
+                            "quality": quality_report,
+                        }
                         if empty_reason is not None:
                             metadata.update(
                                 {
                                     "empty_table_fallback": True,
                                     "empty_table_reason": empty_reason,
+                                    "empty_retry_limit": 3,
                                 }
                             )
                         self.cache.put_tile(cache_key, markdown, metadata)
@@ -917,13 +1105,16 @@ class TablePipeline:
                         }
                     else:
                         region_markdown, quality = merge_logical_tiles(
-                            contents, plans,
+                            contents,
+                            plans,
                             len(region["row_boundaries"]) - 1,
                             len(region["column_boundaries"]) - 1,
                             tile_ink_masks,
                         )
                     _json_dump(
-                        manifest_path.parent / "quality" / f"region_{region['index']:03d}.json",
+                        manifest_path.parent
+                        / "quality"
+                        / f"region_{region['index']:03d}.json",
                         quality,
                     )
                     for warning in quality.get("warnings", []):
@@ -944,10 +1135,9 @@ class TablePipeline:
                     "source_image": image_name,
                     "region_index": region["index"],
                     "error": str(error),
-                    "fallback": "按切片顺序保留模型原始输出",
+                    "fallback": "禁止损坏响应进入最终结果，区域标记为不完整",
                     "response_files": [
-                        f"responses/{Path(plan.file_name).stem}.md"
-                        for plan in plans
+                        f"responses/{Path(plan.file_name).stem}.md" for plan in plans
                     ],
                 }
                 _json_dump(
@@ -968,15 +1158,22 @@ class TablePipeline:
                         },
                     },
                 )
+                tile_failures.append(
+                    {
+                        "source_image": image_name,
+                        "region_index": region["index"],
+                        "tile_file_name": "<区域合并>",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
                 print(
-                    f"[图表警告] 原图 {image_name} / "
+                    f"[图表区域损坏] 原图 {image_name} / "
                     f"区域 {region['index'] + 1} 无法可靠合并："
-                    f"{error}；已保留模型原始输出继续生成。",
+                    f"{error}；禁止把损坏响应拼入最终结果，继续下一区域。",
                     flush=True,
                 )
-                region_markdown = "\n\n".join(
-                    contents[key] for key in sorted(contents)
-                )
+                continue
             region_markdowns.append(region_markdown.strip())
         part_failure_path = manifest_path.parent / "recognition_failures.json"
         _json_dump(
@@ -1031,9 +1228,7 @@ class TablePipeline:
             canonical_name = item["canonical_file_name"]
             cached = self.cache.get_image(item["sha256"], recognition_digest)
             if cached is None:
-                cached = self._recognize_manifest(
-                    Path(item["image_manifest"]), client
-                )
+                cached = self._recognize_manifest(Path(item["image_manifest"]), client)
                 self.cache.put_image(
                     item["sha256"],
                     recognition_digest,
@@ -1085,13 +1280,9 @@ class TablePipeline:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 outcomes = list(executor.map(recognize_safely, canonical_items))
         canonical_results = {
-            name: markdown
-            for name, markdown, _ in outcomes
-            if markdown is not None
+            name: markdown for name, markdown, _ in outcomes if markdown is not None
         }
-        failures = [
-            failure for _, _, failure in outcomes if failure is not None
-        ]
+        failures = [failure for _, _, failure in outcomes if failure is not None]
 
         results = {
             item["file_name"]: canonical_results[item["canonical_file_name"]]
@@ -1101,9 +1292,7 @@ class TablePipeline:
         results_dir = self.work_dir / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
         for file_name, markdown in results.items():
-            result_path = (
-                results_dir / f"{Path(file_name).stem}.md"
-            )
+            result_path = results_dir / f"{Path(file_name).stem}.md"
             result_path.write_text(markdown, encoding="utf-8")
 
         failure_report_path = self.work_dir / "recognition_failures.json"
@@ -1121,8 +1310,7 @@ class TablePipeline:
             partial_csv = self.work_dir / "partial_results.csv"
             write_submission(results, partial_csv)
             failed_names = ", ".join(
-                failure["canonical_file_name"]
-                for failure in failures
+                failure["canonical_file_name"] for failure in failures
             )
             raise RuntimeError(
                 f"图表识别跑完其他图片后仍有 {len(failures)} 张失败；"

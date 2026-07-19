@@ -98,13 +98,21 @@ class ResultCache:
                 ),
             )
 
-    def get_tile(self, cache_key: str) -> str | None:
+    def get_tile_entry(self, cache_key: str) -> tuple[str, dict] | None:
+        """同时读取切片正文和状态元数据，供质量闸门判断缓存来源。"""
+
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT markdown FROM tile_results WHERE cache_key=?",
+                "SELECT markdown, metadata_json FROM tile_results WHERE cache_key=?",
                 (cache_key,),
             ).fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        return row[0], json.loads(row[1])
+
+    def get_tile(self, cache_key: str) -> str | None:
+        entry = self.get_tile_entry(cache_key)
+        return entry[0] if entry else None
 
     def put_tile(self, cache_key: str, markdown: str, metadata: dict) -> None:
         with self._connect() as connection:
@@ -122,6 +130,20 @@ class ResultCache:
                 ),
             )
 
+    def delete_tile(self, cache_key: str) -> None:
+        """删除已经确认损坏的切片缓存。
+
+        历史版本曾把截断 HTML、空字符串等异常响应当作成功结果写入缓存。
+        新版质量检查发现这类记录后必须真正删除，否则每次重跑都会先命中同一
+        条坏记录，既污染诊断信息，也容易被后续代码误当成可复用结果。
+        """
+
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM tile_results WHERE cache_key=?",
+                (cache_key,),
+            )
+
 
 def merge_result_caches(
     destination: str | Path,
@@ -137,11 +159,13 @@ def merge_result_caches(
     ResultCache(destination_path)
     columns = {
         "image_results": (
-            "image_sha256", "config_digest", "markdown", "metadata_json", "created_at"
+            "image_sha256",
+            "config_digest",
+            "markdown",
+            "metadata_json",
+            "created_at",
         ),
-        "tile_results": (
-            "cache_key", "markdown", "metadata_json", "created_at"
-        ),
+        "tile_results": ("cache_key", "markdown", "metadata_json", "created_at"),
     }
     inserted = {table: 0 for table in columns}
     with sqlite3.connect(destination_path, timeout=60.0) as output:

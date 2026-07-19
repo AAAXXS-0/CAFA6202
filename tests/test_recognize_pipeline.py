@@ -1,6 +1,5 @@
 from pathlib import Path
 import csv
-import json
 import tempfile
 import unittest
 
@@ -21,7 +20,7 @@ class FakeClient:
     def recognize(self, image_path: Path, prompt: str) -> str:
         self.calls += 1
         self.assertions(image_path, prompt)
-        return "| 项目 | 数值 |\n| --- | --- |\n| A | 1 |"
+        return "<table><tr><td>A</td></tr></table>"
 
     @staticmethod
     def assertions(image_path: Path, prompt: str) -> None:

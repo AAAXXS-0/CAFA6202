@@ -40,8 +40,16 @@ class TableEmptyFallbackTest(unittest.TestCase):
         image.save(tile_path)
 
         tile = TilePlan(
-            0, 0, 0, 1, 1, Box(0, 0, 60, 40),
-            60, 40, 1.0, tile_path.name,
+            0,
+            0,
+            0,
+            1,
+            1,
+            Box(0, 0, 60, 40),
+            60,
+            40,
+            1.0,
+            tile_path.name,
             logical_row_start=0,
             logical_row_end=2,
             logical_column_start=0,
@@ -64,7 +72,9 @@ class TableEmptyFallbackTest(unittest.TestCase):
             json.dumps(manifest, ensure_ascii=False),
             encoding="utf-8",
         )
-        return TablePipeline(TableConfig(backend="pillow"), root / "work"), manifest_path
+        return TablePipeline(
+            TableConfig(backend="pillow"), root / "work"
+        ), manifest_path
 
     def test_preprocessed_empty_table_skips_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -84,9 +94,15 @@ class TableEmptyFallbackTest(unittest.TestCase):
 
             html = pipeline._recognize_manifest(manifest_path, client)
 
-            self.assertEqual(client.calls, 1)
+            # 首次请求后再复核 3 次，连续全空才采用预处理物理矩阵兜底。
+            self.assertEqual(client.calls, 4)
             self.assertEqual(html.count("<tr>"), 2)
             self.assertEqual(html.count("<td></td>"), 6)
+
+            # 已确认的全空兜底带有明确缓存状态，重跑不能再做四次复核。
+            cached_html = pipeline._recognize_manifest(manifest_path, client)
+            self.assertEqual(client.calls, 4)
+            self.assertEqual(cached_html, html)
 
 
 if __name__ == "__main__":

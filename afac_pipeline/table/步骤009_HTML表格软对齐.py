@@ -78,12 +78,18 @@ class _FirstTableParser(HTMLParser):
             if tag == "table" and self.table_depth > 0:
                 self.table_depth -= 1
             return
-        if tag in {"th", "td"} and self.current_tag == tag and self.current_row is not None:
+        if (
+            tag in {"th", "td"}
+            and self.current_tag == tag
+            and self.current_row is not None
+        ):
             try:
                 rowspan = max(1, int(self.current_attrs.get("rowspan", "1")))
                 colspan = max(1, int(self.current_attrs.get("colspan", "1")))
             except ValueError as error:
-                raise HtmlTableMergeError("HTML 单元格的 rowspan/colspan 不是整数") from error
+                raise HtmlTableMergeError(
+                    "HTML 单元格的 rowspan/colspan 不是整数"
+                ) from error
             text = re.sub(r"[ \t\r\f\v]+", " ", "".join(self.current_text)).strip()
             self.current_row.append(Cell(text, tag, rowspan, colspan))
             self.current_tag = None
@@ -163,6 +169,37 @@ def parse_table_response(response: str) -> ParsedResponse:
     return _parse_html(response) or _parse_markdown(response)
 
 
+def _response_format_guard(response: str) -> None:
+    """在宽松解析前拦截截断、多表重复和围栏循环。
+
+    HTMLParser 会容忍不少残缺标签，这对浏览器是优点，但对切片缓存很危险：
+    半截结果也可能被当成成功。因此先检查正式运行中已经出现过的损坏形态。
+    """
+
+    table_starts = len(re.findall(r"<table\b", response, re.IGNORECASE))
+    table_ends = len(re.findall(r"</table\s*>", response, re.IGNORECASE))
+    if table_starts != table_ends:
+        raise HtmlTableMergeError(
+            f"HTML 表格标签不闭合：开始 {table_starts} 个，结束 {table_ends} 个"
+        )
+    if table_starts > 1:
+        raise HtmlTableMergeError(
+            f"单个切片返回了 {table_starts} 张 HTML 表，疑似重复生成"
+        )
+    fence_count = response.count("```")
+    if fence_count > 4:
+        raise HtmlTableMergeError(
+            f"响应包含 {fence_count} 个代码围栏，疑似 Markdown 围栏循环"
+        )
+
+
+def parse_table_response_checked(response: str) -> ParsedResponse:
+    """解析单个切片响应，并拒绝已知的损坏输出。"""
+
+    _response_format_guard(response)
+    return parse_table_response(response)
+
+
 def _render(
     placements: list[Placement],
     row_count: int,
@@ -196,7 +233,9 @@ def _render(
                         covered.add((covered_row, covered_column))
         lines.append("  </tr>")
     lines.append("</table>")
-    parts = [part for part in (prefix.strip(), "\n".join(lines), suffix.strip()) if part]
+    parts = [
+        part for part in (prefix.strip(), "\n".join(lines), suffix.strip()) if part
+    ]
     return "\n".join(parts)
 
 
@@ -212,7 +251,7 @@ def render_empty_table(row_count: int, column_count: int) -> str:
 
 
 def normalize_table_response(response: str) -> tuple[str, dict[str, int]]:
-    parsed = parse_table_response(response)
+    parsed = parse_table_response_checked(response)
     return (
         _render(
             parsed.placements,
@@ -229,8 +268,7 @@ def _simple_rows(parsed: ParsedResponse) -> list[list[Cell]] | None:
     """把没有合并单元格的响应还原成逐行序列，供软对齐使用。"""
 
     if any(
-        item.cell.rowspan != 1 or item.cell.colspan != 1
-        for item in parsed.placements
+        item.cell.rowspan != 1 or item.cell.colspan != 1 for item in parsed.placements
     ):
         return None
     rows: list[list[Cell]] = [[] for _ in range(parsed.row_count)]
@@ -239,6 +277,100 @@ def _simple_rows(parsed: ParsedResponse) -> list[list[Cell]] | None:
             return None
         rows[item.row].append(item.cell)
     return rows
+
+
+def _cell_signature(cell: Cell) -> str:
+    # 重复表头有时会在 th/td 间漂移，判重只比较真实文字。
+    return cell.text.strip()
+
+
+def _remove_extra_simple_structure(
+    rows: list[list[Cell]],
+    expected_rows: int,
+    expected_columns: int,
+) -> tuple[list[list[Cell]], list[str]]:
+    """删除模型偶尔附加的全空边缘和重复表头/首列。"""
+
+    warnings = []
+    width = max((len(row) for row in rows), default=0)
+    matrix = [[*row, *[Cell("") for _ in range(width - len(row))]] for row in rows]
+
+    removed_empty_rows = 0
+    while len(matrix) > expected_rows:
+        index = next(
+            (
+                i
+                for i, row in enumerate(matrix)
+                if not any(cell.text.strip() for cell in row)
+            ),
+            None,
+        )
+        if index is None:
+            break
+        matrix.pop(index)
+        removed_empty_rows += 1
+
+    removed_repeated_rows = 0
+    while len(matrix) > expected_rows and matrix:
+        first = tuple(_cell_signature(cell) for cell in matrix[0])
+        index = next(
+            (
+                i
+                for i, row in enumerate(matrix[1:], start=1)
+                if tuple(_cell_signature(cell) for cell in row) == first
+            ),
+            None,
+        )
+        if index is None:
+            break
+        matrix.pop(index)
+        removed_repeated_rows += 1
+
+    removed_empty_columns = 0
+    while matrix and len(matrix[0]) > expected_columns:
+        index = next(
+            (
+                column
+                for column in range(len(matrix[0]))
+                if not any(row[column].text.strip() for row in matrix)
+            ),
+            None,
+        )
+        if index is None:
+            break
+        for row in matrix:
+            row.pop(index)
+        removed_empty_columns += 1
+
+    removed_repeated_columns = 0
+    while matrix and len(matrix[0]) > expected_columns:
+        first = tuple(_cell_signature(row[0]) for row in matrix)
+        index = next(
+            (
+                column
+                for column in range(1, len(matrix[0]))
+                if tuple(_cell_signature(row[column]) for row in matrix) == first
+            ),
+            None,
+        )
+        if index is None:
+            break
+        for row in matrix:
+            row.pop(index)
+        removed_repeated_columns += 1
+
+    if (
+        removed_empty_rows
+        + removed_repeated_rows
+        + removed_empty_columns
+        + removed_repeated_columns
+    ):
+        warnings.append(
+            "已删除模型额外生成的无信息结构："
+            f"空行 {removed_empty_rows}、重复表头行 {removed_repeated_rows}、"
+            f"空列 {removed_empty_columns}、重复首列 {removed_repeated_columns}"
+        )
+    return matrix, warnings
 
 
 def _sequence_mapping(
@@ -252,13 +384,9 @@ def _sequence_mapping(
     if actual_count > expected_count:
         return None
     infinity = float("inf")
-    costs = [
-        [infinity] * (actual_count + 1)
-        for _ in range(expected_count + 1)
-    ]
+    costs = [[infinity] * (actual_count + 1) for _ in range(expected_count + 1)]
     previous: list[list[tuple[int, int, bool] | None]] = [
-        [None] * (actual_count + 1)
-        for _ in range(expected_count + 1)
+        [None] * (actual_count + 1) for _ in range(expected_count + 1)
     ]
     costs[0][0] = 0.0
     for expected in range(expected_count):
@@ -300,26 +428,55 @@ def _soft_align_parsed(
     expected_columns: int,
     ink_mask: list[list[bool]] | None,
 ) -> tuple[ParsedResponse, list[str]]:
-    """按墨迹槽位补回模型省略的空行空列，模型文字始终优先保留。"""
+    """把模型内容放回预处理确定的固定物理矩阵。"""
 
-    if (
-        parsed.row_count == expected_rows
-        and parsed.column_count == expected_columns
-    ):
+    if parsed.row_count == expected_rows and parsed.column_count == expected_columns:
         return parsed, []
+
     warning = (
         f"模型返回 {parsed.row_count}×{parsed.column_count}，"
-        f"预处理参考为 {expected_rows}×{expected_columns}"
+        f"预处理物理结构为 {expected_rows}×{expected_columns}"
     )
     rows = _simple_rows(parsed)
-    if (
-        rows is None
-        or parsed.row_count > expected_rows
-        or any(len(row) > expected_columns for row in rows)
-    ):
-        # 合并单元格或模型给出更多结构时不强行改写，只在全局边界内保留
-        # 模型原始坐标，并把差异交给quality warning。
-        return parsed, [warning + "；保留模型原始结构"]
+    if rows is None:
+        clipped = []
+        clipped_count = 0
+        for item in parsed.placements:
+            if item.row >= expected_rows or item.column >= expected_columns:
+                if item.cell.text.strip():
+                    raise HtmlTableMergeError(
+                        warning + "；合并单元格在预处理网格之外仍含非空内容"
+                    )
+                clipped_count += 1
+                continue
+            rowspan = min(item.cell.rowspan, expected_rows - item.row)
+            colspan = min(item.cell.colspan, expected_columns - item.column)
+            if rowspan != item.cell.rowspan or colspan != item.cell.colspan:
+                clipped_count += 1
+            clipped.append(
+                Placement(
+                    Cell(item.cell.text, item.cell.tag, rowspan, colspan),
+                    item.row,
+                    item.column,
+                )
+            )
+        detail = "；已限制在预处理物理边界内"
+        if clipped_count:
+            detail += f"，裁掉 {clipped_count} 个越界空位或跨度"
+        return (
+            ParsedResponse(
+                parsed.prefix, parsed.suffix, clipped, expected_rows, expected_columns
+            ),
+            [warning + detail],
+        )
+
+    rows, cleanup_warnings = _remove_extra_simple_structure(
+        rows, expected_rows, expected_columns
+    )
+    if len(rows) > expected_rows or any(len(row) > expected_columns for row in rows):
+        raise HtmlTableMergeError(
+            warning + "；删除空行空列及重复表头后仍有非空结构超出预处理网格"
+        )
 
     normalized_mask = [
         [
@@ -334,27 +491,22 @@ def _soft_align_parsed(
         for row in range(expected_rows)
     ]
     if not ink_mask:
-        normalized_mask = [
-            [True] * expected_columns
-            for _ in range(expected_rows)
-        ]
+        normalized_mask = [[True] * expected_columns for _ in range(expected_rows)]
     expected_row_ink = [sum(row) for row in normalized_mask]
-    actual_row_ink = [
-        sum(bool(cell.text.strip()) for cell in row)
-        for row in rows
-    ]
+    actual_row_ink = [sum(bool(cell.text.strip()) for cell in row) for row in rows]
     row_mapping = _sequence_mapping(
         expected_rows,
         len(rows),
-        lambda expected, actual: abs(
-            expected_row_ink[expected] - actual_row_ink[actual]
-        ) / max(1, expected_row_ink[expected]),
+        lambda expected, actual: (
+            abs(expected_row_ink[expected] - actual_row_ink[actual])
+            / max(1, expected_row_ink[expected])
+        ),
         lambda expected: 0.0 if expected_row_ink[expected] == 0 else 2.0,
     )
     if row_mapping is None:
-        return parsed, [warning + "；无法可靠对齐行，保留模型原始结构"]
+        raise HtmlTableMergeError(warning + "；无法可靠映射到预处理行坐标")
 
-    aligned: list[Placement] = []
+    aligned = []
     for actual_row, cells in enumerate(rows):
         expected_row = row_mapping[actual_row]
         flags = normalized_mask[expected_row]
@@ -369,21 +521,16 @@ def _soft_align_parsed(
             lambda expected: 0.0 if not flags[expected] else 1.5,
         )
         if column_mapping is None:
-            column_mapping = list(range(len(cells)))
-        for actual_column, cell in enumerate(cells):
-            aligned.append(
-                Placement(cell, expected_row, column_mapping[actual_column])
+            raise HtmlTableMergeError(
+                warning + f"；第 {actual_row + 1} 行无法可靠映射到预处理列坐标"
             )
+        for actual_column, cell in enumerate(cells):
+            aligned.append(Placement(cell, expected_row, column_mapping[actual_column]))
     return (
         ParsedResponse(
-            parsed.prefix,
-            parsed.suffix,
-
-            aligned,
-            expected_rows,
-            expected_columns,
+            parsed.prefix, parsed.suffix, aligned, expected_rows, expected_columns
         ),
-        [warning + "；已按单元格墨迹补齐空位"],
+        [*cleanup_warnings, warning + "；已按单元格墨迹补齐空位"],
     )
 
 
@@ -393,9 +540,11 @@ def normalize_table_response_soft(
     expected_columns: int,
     ink_mask: list[list[bool]] | None = None,
 ) -> tuple[str, dict[str, object]]:
-    """以模型内容为主，利用预处理墨迹参考补回被省略的空位。"""
+    """固定预处理行列数，并把模型内容映射到对应物理格。"""
 
-    parsed = parse_table_response(response)
+    if expected_rows <= 0 or expected_columns <= 0:
+        raise ValueError("预处理物理行列数必须大于 0")
+    parsed = parse_table_response_checked(response)
     actual = {"rows": parsed.row_count, "columns": parsed.column_count}
     aligned, warnings = _soft_align_parsed(
         parsed,
@@ -411,8 +560,17 @@ def normalize_table_response_soft(
             aligned.prefix,
             aligned.suffix,
         ),
-        {**actual, "warnings": warnings},
+        {
+            **actual,
+            "nonempty_cells": sum(
+                bool(item.cell.text.strip()) for item in parsed.placements
+            ),
+            "warnings": warnings,
+            "physical_rows": expected_rows,
+            "physical_columns": expected_columns,
+        },
     )
+
 
 def merge_logical_tiles(
     contents: dict[tuple[int, int], str],
@@ -435,7 +593,7 @@ def merge_logical_tiles(
     all_warnings: list[str] = []
     for key in sorted(contents):
         plan = plan_map[key]
-        parsed = parse_table_response(contents[key])
+        parsed = parse_table_response_checked(contents[key])
         expected_rows = plan.header_context_rows + (
             plan.logical_row_end - plan.logical_row_start
         )
@@ -451,10 +609,7 @@ def merge_logical_tiles(
             tile_ink_masks.get(key) if tile_ink_masks else None,
         )
         parsed_by_key[key] = parsed
-        all_warnings.extend(
-            f"{plan.file_name}：{warning}"
-            for warning in warnings
-        )
+        all_warnings.extend(f"{plan.file_name}：{warning}" for warning in warnings)
         tile_reports.append(
             {
                 "tile": plan.file_name,
