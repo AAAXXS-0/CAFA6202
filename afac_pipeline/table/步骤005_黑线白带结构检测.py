@@ -11,7 +11,11 @@ from PIL import Image
 from ..common.models import Box, DetectedBox
 from .config import TableConfig
 from .步骤002_低密度分表 import DensityBand, _runs, boxes_from_bands, find_density_bands
-from .步骤004_网格与白带检测 import GridStructure, _whitespace_centers
+from .步骤004_网格与白带检测 import (
+    GridStructure,
+    _whitespace_centers,
+    _whitespace_dilate_kernels,
+)
 from .步骤001_墨水密度定位 import InkRegionResult, detect_ink_regions
 
 
@@ -47,6 +51,46 @@ class RejectedColumnLine:
 
 
 @dataclass(frozen=True)
+class WhiteColumnBand:
+    """一条纵向白带在20%分析图中的完整像素范围。"""
+
+    start: int
+    end: int
+
+    @property
+    def position(self) -> int:
+        return round((self.start + self.end - 1) / 2)
+
+    @property
+    def width(self) -> int:
+        return self.end - self.start
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "position": self.position,
+            "start": self.start,
+            "end": self.end,
+            "width": self.width,
+        }
+
+
+@dataclass(frozen=True)
+class RejectedWhiteColumnBand:
+    """因本表自适应列宽复核被删除的纵向白带。"""
+
+    band: WhiteColumnBand
+    reason: str
+    selected_minimum: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self.band.to_dict(),
+            "reason": self.reason,
+            "selected_minimum": self.selected_minimum,
+        }
+
+
+@dataclass(frozen=True)
 class V6RegionResult:
     """分表阶段的全部结果，既供正式流程使用，也供审计图保存。"""
 
@@ -74,6 +118,13 @@ class V6GridDiagnostics:
     used_black_columns: tuple[LineSegment, ...] = ()
     rejected_black_columns: tuple[RejectedColumnLine, ...] = ()
     column_cleanup: str = ""
+    raw_white_column_bands: tuple[WhiteColumnBand, ...] = ()
+    used_white_column_bands: tuple[WhiteColumnBand, ...] = ()
+    rejected_white_column_bands: tuple[RejectedWhiteColumnBand, ...] = ()
+    white_column_min_band: int = 1
+    white_column_regularity_before: float = 0.0
+    white_column_regularity_after: float = 0.0
+    white_column_cleanup: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -100,6 +151,24 @@ class V6GridDiagnostics:
             ],
             "rejected_black_column_count": len(self.rejected_black_columns),
             "column_cleanup": self.column_cleanup,
+            "raw_white_column_bands": [
+                band.to_dict() for band in self.raw_white_column_bands
+            ],
+            "used_white_column_bands": [
+                band.to_dict() for band in self.used_white_column_bands
+            ],
+            "rejected_white_column_bands": [
+                item.to_dict() for item in self.rejected_white_column_bands
+            ],
+            "raw_white_column_count": len(self.raw_white_column_bands),
+            "used_white_column_count": len(self.used_white_column_bands),
+            "rejected_white_column_count": len(
+                self.rejected_white_column_bands
+            ),
+            "white_column_min_band": self.white_column_min_band,
+            "white_column_regularity_before": self.white_column_regularity_before,
+            "white_column_regularity_after": self.white_column_regularity_after,
+            "white_column_cleanup": self.white_column_cleanup,
             "row_reliability": self.row_reliability,
             "column_reliability": self.column_reliability,
             "black_rows_at_whitespace_scale": [
@@ -310,6 +379,150 @@ def adaptive_line_segments(
             )
         )
     return segments
+
+
+def _white_column_spacing_regularity(
+    bands: list[WhiteColumnBand],
+) -> float:
+    """计算多数相邻白带是否遵循同一列距；允许少量宽列和合并列。"""
+
+    if len(bands) < 3:
+        return 0.0
+    positions = np.asarray([band.position for band in bands], dtype=np.int32)
+    gaps = np.diff(positions)
+    positive = gaps[gaps > 0]
+    if positive.size == 0:
+        return 0.0
+    typical = float(np.median(positive))
+    tolerance = max(2.0, typical * 0.18)
+    return float(np.mean(np.abs(positive - typical) <= tolerance))
+
+
+def select_adaptive_white_column_bands(
+    ink: np.ndarray,
+    config: TableConfig,
+) -> tuple[
+    list[WhiteColumnBand],
+    list[WhiteColumnBand],
+    list[RejectedWhiteColumnBand],
+    int,
+    float,
+    float,
+    str,
+]:
+    """只为列白带选择固定最小宽度，横向行白带仍严格保持1像素能力。"""
+
+    _, vertical_kernel = _whitespace_dilate_kernels(ink, config)
+    expanded = cv2.dilate(
+        ink.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_kernel)),
+    )
+    raw_bands = [
+        WhiteColumnBand(start, end)
+        for start, end in _runs(
+            expanded.mean(axis=0) <= config.whitespace_blank_ratio
+        )
+        if end - start >= config.whitespace_min_band
+    ]
+    base_minimum = config.whitespace_min_band
+    before = _white_column_spacing_regularity(raw_bands)
+    if (
+        len(raw_bands) < 6
+        or config.whitespace_column_max_min_band == base_minimum
+        or before >= config.whitespace_column_regular_spacing_ratio
+    ):
+        message = (
+            f"原始{len(raw_bands)}根，间距稳定度{before:.1%}，"
+            f"列白带保持{base_minimum}px"
+        )
+        return (
+            raw_bands,
+            raw_bands,
+            [],
+            base_minimum,
+            before,
+            before,
+            message,
+        )
+
+    required_count = max(
+        5,
+        int(np.ceil(
+            len(raw_bands) * config.whitespace_column_min_retention_ratio
+        )),
+    )
+    best_bands = raw_bands
+    best_minimum = base_minimum
+    best_regularity = before
+    for minimum in range(
+        base_minimum + 1,
+        config.whitespace_column_max_min_band + 1,
+    ):
+        kept = [band for band in raw_bands if band.width >= minimum]
+        removed = [band for band in raw_bands if band.width < minimum]
+        if len(kept) < required_count or not removed:
+            continue
+        kept_width = float(np.median([band.width for band in kept]))
+        removed_width = float(np.median([band.width for band in removed]))
+        if (
+            kept_width
+            < removed_width
+            * config.whitespace_column_min_width_separation_ratio
+        ):
+            continue
+        regularity = _white_column_spacing_regularity(kept)
+        if regularity > best_regularity + 1e-9:
+            best_bands = kept
+            best_minimum = minimum
+            best_regularity = regularity
+
+    gain = best_regularity - before
+    if (
+        best_minimum == base_minimum
+        or gain < config.whitespace_column_min_regularity_gain
+    ):
+        message = (
+            f"原始{len(raw_bands)}根，尝试至"
+            f"{config.whitespace_column_max_min_band}px后改善不足，保持"
+            f"{base_minimum}px；稳定度{before:.1%}"
+        )
+        return (
+            raw_bands,
+            raw_bands,
+            [],
+            base_minimum,
+            before,
+            before,
+            message,
+        )
+
+    kept_set = set(best_bands)
+    rejected = [
+        RejectedWhiteColumnBand(
+            band=band,
+            reason=(
+                f"白带宽{band.width}px，小于本区域选择的"
+                f"{best_minimum}px；删除后列间距更稳定"
+            ),
+            selected_minimum=best_minimum,
+        )
+        for band in raw_bands
+        if band not in kept_set
+    ]
+    message = (
+        f"原始{len(raw_bands)}根，列白带固定最小宽度"
+        f"{base_minimum}→{best_minimum}px，保留{len(best_bands)}根，"
+        f"间距稳定度{before:.1%}→{best_regularity:.1%}"
+    )
+    return (
+        raw_bands,
+        best_bands,
+        rejected,
+        best_minimum,
+        before,
+        best_regularity,
+        message,
+    )
 
 
 def clean_suspicious_column_lines(
@@ -573,7 +786,16 @@ def detect_v6_grid(
         else white_ink
     )
     white_rows = _whitespace_centers(ink_for_rows, config)[0]
-    white_columns = _whitespace_centers(ink_for_columns, config)[1]
+    (
+        raw_white_column_bands,
+        used_white_column_bands,
+        rejected_white_column_bands,
+        white_column_min_band,
+        white_column_regularity_before,
+        white_column_regularity_after,
+        white_column_cleanup,
+    ) = select_adaptive_white_column_bands(ink_for_columns, config)
+    white_columns = [band.position for band in used_white_column_bands]
 
     row_centers = [line.position for line in black_rows] if row_is_black else white_rows
     column_centers = (
@@ -604,6 +826,13 @@ def detect_v6_grid(
             used_black_columns=tuple(black_columns),
             rejected_black_columns=tuple(rejected_black_columns),
             column_cleanup=column_cleanup,
+            raw_white_column_bands=tuple(raw_white_column_bands),
+            used_white_column_bands=tuple(used_white_column_bands),
+            rejected_white_column_bands=tuple(rejected_white_column_bands),
+            white_column_min_band=white_column_min_band,
+            white_column_regularity_before=white_column_regularity_before,
+            white_column_regularity_after=white_column_regularity_after,
+            white_column_cleanup=white_column_cleanup,
         )
         return GridStructure("unavailable", (), ()), diagnostics
 
@@ -630,7 +859,13 @@ def detect_v6_grid(
             include_outer=False,
         )
         if column_is_black
-        else ()
+        else _map_centers(
+            [band.position for band in raw_white_column_bands],
+            analysis_image.width,
+            source_region.x1,
+            source_region.width,
+            include_outer=True,
+        )
     )
     rejected_columns = (
         _map_centers(
@@ -641,7 +876,13 @@ def detect_v6_grid(
             include_outer=False,
         )
         if column_is_black
-        else ()
+        else _map_centers(
+            [item.band.position for item in rejected_white_column_bands],
+            analysis_image.width,
+            source_region.x1,
+            source_region.width,
+            include_outer=False,
+        )
     )
     row_cells_ok, row_cell_reason = _boundaries_have_reasonable_cells(
         rows, config.grid_max_cell_span_ratio
@@ -663,6 +904,13 @@ def detect_v6_grid(
         used_black_columns=tuple(black_columns),
         rejected_black_columns=tuple(rejected_black_columns),
         column_cleanup=column_cleanup,
+        raw_white_column_bands=tuple(raw_white_column_bands),
+        used_white_column_bands=tuple(used_white_column_bands),
+        rejected_white_column_bands=tuple(rejected_white_column_bands),
+        white_column_min_band=white_column_min_band,
+        white_column_regularity_before=white_column_regularity_before,
+        white_column_regularity_after=white_column_regularity_after,
+        white_column_cleanup=white_column_cleanup,
     )
     if len(rows) < 2 or len(columns) < 2 or not row_cells_ok or not column_cells_ok:
         return (

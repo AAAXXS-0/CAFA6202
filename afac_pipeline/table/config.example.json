@@ -39,6 +39,11 @@
   "grid_min_cell_size": 18,
   "whitespace_blank_ratio": 0.01,
   "whitespace_min_band": 1,
+  "whitespace_column_max_min_band": 7,
+  "whitespace_column_regular_spacing_ratio": 0.90,
+  "whitespace_column_min_regularity_gain": 0.08,
+  "whitespace_column_min_retention_ratio": 0.25,
+  "whitespace_column_min_width_separation_ratio": 1.60,
   "whitespace_dilate_ratio": 0.004,
   "whitespace_horizontal_dilate_ratio": 0.0015,
   "whitespace_vertical_dilate_ratio": 0.004,
@@ -51,5 +56,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v19-adaptive-column-cleanup"
+  "pipeline_version": "table-v20-adaptive-white-column-width"
 }

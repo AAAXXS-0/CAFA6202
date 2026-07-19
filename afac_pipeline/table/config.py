@@ -77,7 +77,16 @@ class TableConfig:
     grid_max_cell_span_ratio: float = 0.95
     grid_min_cell_size: int = 18
     whitespace_blank_ratio: float = 0.01
+    # 横向行白带始终保留1像素能力；只有纵向列白带会按每个分表区域从
+    # 1～7像素中选择一个固定最小宽度。
     whitespace_min_band: int = 1
+    whitespace_column_max_min_band: int = 7
+    # 原始列间距已有90%稳定度时保持1像素，不触发清理。否则新宽度至少
+    # 改善8个百分点、保留25%候选，并且保留白带要明显宽于删除白带。
+    whitespace_column_regular_spacing_ratio: float = 0.90
+    whitespace_column_min_regularity_gain: float = 0.08
+    whitespace_column_min_retention_ratio: float = 0.25
+    whitespace_column_min_width_separation_ratio: float = 1.60
     whitespace_dilate_ratio: float = 0.004
     whitespace_horizontal_dilate_ratio: float | None = 0.0015
     whitespace_vertical_dilate_ratio: float | None = 0.004
@@ -96,7 +105,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v19-adaptive-column-cleanup"
+    pipeline_version: str = "table-v20-adaptive-white-column-width"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -175,6 +184,16 @@ class TableConfig:
             raise ValueError("whitespace_blank_ratio 必须位于 [0, 1) 内")
         if self.whitespace_min_band <= 0 or self.whitespace_dilate_ratio <= 0:
             raise ValueError("空白带最小宽度和墨水扩张比例必须大于 0")
+        if not 1 <= self.whitespace_column_max_min_band <= 64:
+            raise ValueError("列白带最大最小宽度必须位于1和64之间")
+        if not 0 < self.whitespace_column_regular_spacing_ratio <= 1:
+            raise ValueError("列间距稳定度阈值必须位于 (0, 1] 内")
+        if not 0 <= self.whitespace_column_min_regularity_gain <= 1:
+            raise ValueError("列间距最小改善值必须位于 [0, 1] 内")
+        if not 0 < self.whitespace_column_min_retention_ratio <= 1:
+            raise ValueError("列白带最小保留比例必须位于 (0, 1] 内")
+        if self.whitespace_column_min_width_separation_ratio <= 1:
+            raise ValueError("保留与删除白带宽度比必须大于1")
         if (
             self.whitespace_horizontal_dilate_ratio is not None
             and self.whitespace_horizontal_dilate_ratio <= 0

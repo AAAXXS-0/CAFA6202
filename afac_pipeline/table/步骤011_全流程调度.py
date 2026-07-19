@@ -460,6 +460,40 @@ class TablePipeline:
             cleanup_overlay.save(
                 analysis_dir / f"region_{region_index:03d}_black_50_cleanup.png"
             )
+            white_cleanup = analysis.copy()
+            white_cleanup_draw = ImageDraw.Draw(white_cleanup)
+            for band in diagnostics.raw_white_column_bands:
+                white_cleanup_draw.rectangle(
+                    (
+                        band.start,
+                        0,
+                        max(band.start, band.end - 1),
+                        analysis.height - 1,
+                    ),
+                    outline=(0, 80, 255),
+                    width=1,
+                )
+            for band in diagnostics.used_white_column_bands:
+                white_cleanup_draw.line(
+                    (band.position, 0, band.position, analysis.height),
+                    fill=(0, 180, 0),
+                    width=2,
+                )
+            for item in diagnostics.rejected_white_column_bands:
+                white_cleanup_draw.line(
+                    (
+                        item.band.position,
+                        0,
+                        item.band.position,
+                        analysis.height,
+                    ),
+                    fill=(255, 0, 255),
+                    width=3,
+                )
+            white_cleanup.save(
+                analysis_dir
+                / f"region_{region_index:03d}_white_column_cleanup.png"
+            )
             diagnostic_data = diagnostics.to_dict()
             diagnostic_data.update(
                 {
