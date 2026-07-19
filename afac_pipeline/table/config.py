@@ -55,6 +55,9 @@ class TableConfig:
     grid_black_column_line_ratio: float = 0.95
     grid_black_column_endpoint_trim_ratio: float = 0.05
     grid_black_column_min_contrast: float = 30.0
+    # 竖线若已有至少 98% 的绝对黑像素覆盖率，本身足以说明它是一条连续
+    # 物理线，此时不再让容易受邻近底色影响的灰度对比规则误杀。
+    grid_black_column_contrast_bypass_ratio: float = 0.98
     grid_reliable_line_count: int = 5
     # 黑线不能只靠“数量够多”就成为物理网格：至少要有一条边界处在表格
     # 中部，且任何一个逻辑格都不能独占所在方向绝大部分长度。
@@ -80,7 +83,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v14-black-lines-at-50-percent"
+    pipeline_version: str = "table-v15-98-percent-bypasses-column-contrast"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -127,6 +130,12 @@ class TableConfig:
             raise ValueError("grid_black_line_ratio 必须位于 (0, 1] 内")
         if not 0 < self.grid_black_column_line_ratio <= 1:
             raise ValueError("grid_black_column_line_ratio 必须位于 (0, 1] 内")
+        if not (
+            self.grid_black_column_line_ratio
+            <= self.grid_black_column_contrast_bypass_ratio
+            <= 1
+        ):
+            raise ValueError("竖线免灰度对比覆盖率必须位于竖线阈值和 1 之间")
         if not 0 <= self.grid_black_column_endpoint_trim_ratio < 0.5:
             raise ValueError(
                 "grid_black_column_endpoint_trim_ratio 必须位于 [0, 0.5) 内"

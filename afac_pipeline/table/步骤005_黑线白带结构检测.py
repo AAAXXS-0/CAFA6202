@@ -208,6 +208,7 @@ def adaptive_line_segments(
     endpoint_trim_ratio: float = 0.0,
     minimum_contrast: float = 0.0,
     contrast_offset_scale: float = 1.0,
+    contrast_bypass_ratio: float | None = None,
 ) -> list[LineSegment]:
     """按覆盖率找整线，并可用中段覆盖率和邻域对比排除数字竖笔画。"""
 
@@ -256,7 +257,13 @@ def adaptive_line_segments(
             shoulder_mean = float(
                 gray_data[shoulder_indices, measure_start:measure_end].mean()
             )
-            if shoulder_mean - center_mean < minimum_contrast:
+            # 覆盖率极高的连续物理线不再依赖邻域灰度差。邻域可能落在灰底、
+            # 文字或缩放后的抗锯齿上，但这些因素不会改变“整列几乎全黑”。
+            bypass_contrast = (
+                contrast_bypass_ratio is not None
+                and scores[index] >= contrast_bypass_ratio
+            )
+            if not bypass_contrast and shoulder_mean - center_mean < minimum_contrast:
                 scores[index] = 0.0
 
     segments: list[LineSegment] = []
@@ -386,6 +393,7 @@ def detect_v6_grid(
         endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
         minimum_contrast=config.grid_black_column_min_contrast,
         contrast_offset_scale=resolution_ratio,
+        contrast_bypass_ratio=config.grid_black_column_contrast_bypass_ratio,
     )
 
     # 白带分支以及它的交叉线擦除继续完全依据 20% 图自身结果，不能让
