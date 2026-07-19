@@ -23,6 +23,10 @@ class GridStructure:
     source: str
     row_boundaries: tuple[int, ...]
     column_boundaries: tuple[int, ...]
+    # 正式切块只使用 column_boundaries；以下两份信息供后处理复核，必要时
+    # 可以恢复备选网格，不需要重新执行像素检测。
+    raw_column_boundaries: tuple[int, ...] = ()
+    rejected_column_boundaries: tuple[int, ...] = ()
 
     @property
     def available(self) -> bool:
@@ -41,6 +45,8 @@ class GridStructure:
             "source": self.source,
             "row_boundaries": list(self.row_boundaries),
             "column_boundaries": list(self.column_boundaries),
+            "raw_column_boundaries": list(self.raw_column_boundaries),
+            "rejected_column_boundaries": list(self.rejected_column_boundaries),
             "row_count": self.row_count,
             "column_count": self.column_count,
         }

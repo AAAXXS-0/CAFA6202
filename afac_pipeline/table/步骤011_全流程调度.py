@@ -420,6 +420,13 @@ class TablePipeline:
                     fill=(0, 80, 255),
                     width=2,
                 )
+            for item in diagnostics.rejected_black_columns:
+                line = item.line
+                black_draw.line(
+                    (line.position, line.start, line.position, line.end),
+                    fill=(255, 0, 255),
+                    width=4,
+                )
             for boundary in grid.row_boundaries[1:-1]:
                 y = round(
                     (boundary - region.y1) * black_analysis.height / region.height
@@ -434,6 +441,24 @@ class TablePipeline:
                 )
             black_overlay.save(
                 analysis_dir / f"region_{region_index:03d}_black_50_candidates.png"
+            )
+            cleanup_overlay = black_analysis.copy()
+            cleanup_draw = ImageDraw.Draw(cleanup_overlay)
+            for line in diagnostics.used_black_columns:
+                cleanup_draw.line(
+                    (line.position, line.start, line.position, line.end),
+                    fill=(0, 180, 0),
+                    width=2,
+                )
+            for item in diagnostics.rejected_black_columns:
+                line = item.line
+                cleanup_draw.line(
+                    (line.position, line.start, line.position, line.end),
+                    fill=(255, 0, 255),
+                    width=4,
+                )
+            cleanup_overlay.save(
+                analysis_dir / f"region_{region_index:03d}_black_50_cleanup.png"
             )
             diagnostic_data = diagnostics.to_dict()
             diagnostic_data.update(
@@ -886,6 +911,10 @@ class TablePipeline:
                     grid_source=grid.source,
                     row_boundaries=list(grid.row_boundaries),
                     column_boundaries=list(grid.column_boundaries),
+                    raw_column_boundaries=list(grid.raw_column_boundaries),
+                    rejected_column_boundaries=list(
+                        grid.rejected_column_boundaries
+                    ),
                     top_context=top_context,
                 )
             )

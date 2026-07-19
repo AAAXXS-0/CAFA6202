@@ -30,6 +30,8 @@
   "grid_black_column_line_ratio": 0.95,
   "grid_black_column_endpoint_trim_ratio": 0.05,
   "grid_black_column_min_contrast": 30.0,
+  "grid_black_column_min_gap_ratio": 0.60,
+  "grid_black_column_close_gap_max_fraction": 0.12,
   "grid_black_column_contrast_bypass_ratio": 0.98,
   "grid_reliable_line_count": 5,
   "grid_interior_margin_ratio": 0.10,
@@ -49,5 +51,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v18-api-140-cell-tiles"
+  "pipeline_version": "table-v19-adaptive-column-cleanup"
 }

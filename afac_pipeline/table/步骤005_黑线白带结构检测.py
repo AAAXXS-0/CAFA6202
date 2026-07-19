@@ -25,6 +25,28 @@ class LineSegment:
 
 
 @dataclass(frozen=True)
+class RejectedColumnLine:
+    """被网格整体规律否决的竖线候选。"""
+
+    line: LineSegment
+    reason: str
+    left_gap: int
+    right_gap: int
+    typical_gap: float
+    minimum_gap: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self.line.__dict__,
+            "reason": self.reason,
+            "left_gap": self.left_gap,
+            "right_gap": self.right_gap,
+            "typical_gap": self.typical_gap,
+            "minimum_gap": self.minimum_gap,
+        }
+
+
+@dataclass(frozen=True)
 class V6RegionResult:
     """分表阶段的全部结果，既供正式流程使用，也供审计图保存。"""
 
@@ -49,6 +71,9 @@ class V6GridDiagnostics:
     column_reliability: str = ""
     black_rows_at_whitespace_scale: tuple[LineSegment, ...] = ()
     black_columns_at_whitespace_scale: tuple[LineSegment, ...] = ()
+    used_black_columns: tuple[LineSegment, ...] = ()
+    rejected_black_columns: tuple[RejectedColumnLine, ...] = ()
+    column_cleanup: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -66,6 +91,15 @@ class V6GridDiagnostics:
             "black_column_count_at_whitespace_scale": len(
                 self.black_columns_at_whitespace_scale
             ),
+            "used_black_columns": [
+                line.__dict__ for line in self.used_black_columns
+            ],
+            "used_black_column_count": len(self.used_black_columns),
+            "rejected_black_columns": [
+                line.to_dict() for line in self.rejected_black_columns
+            ],
+            "rejected_black_column_count": len(self.rejected_black_columns),
+            "column_cleanup": self.column_cleanup,
             "row_reliability": self.row_reliability,
             "column_reliability": self.column_reliability,
             "black_rows_at_whitespace_scale": [
@@ -278,6 +312,89 @@ def adaptive_line_segments(
     return segments
 
 
+def clean_suspicious_column_lines(
+    lines: list[LineSegment], config: TableConfig
+) -> tuple[list[LineSegment], list[RejectedColumnLine], str]:
+    """删除孤立拥挤候选，但保留整张表稳定存在的窄列规律。
+
+    单根中文竖笔画可能在短行高表格中恰好首尾相接，覆盖率、连续性和灰度
+    对比都会与真实竖线相似。此处不再重复判断单根线，而是检查候选线放进
+    整张网格后是否连续制造了异常窄格。
+
+    规则刻意保持保守：只有至少两个连续窄间距组成的局部拥挤簇才处理；若
+    窄间距在全表反复出现，则把它视为真实的密集列规格，不做清理。被删除
+    的候选会完整写入诊断和 manifest，供识别后复核或恢复备选网格。
+    """
+
+    ordered = sorted(lines, key=lambda line: line.position)
+    if len(ordered) < 5:
+        return ordered, [], "候选不足5根，不做网格间距清理"
+
+    positions = np.asarray([line.position for line in ordered], dtype=np.int32)
+    gaps = np.diff(positions)
+    positive_gaps = gaps[gaps > 0]
+    if positive_gaps.size == 0:
+        return ordered, [], "候选没有有效间距，不做网格间距清理"
+
+    typical_gap = float(np.median(positive_gaps))
+    minimum_gap = max(
+        2,
+        min(
+            config.grid_min_cell_size,
+            round(typical_gap * config.grid_black_column_min_gap_ratio),
+        ),
+    )
+    close_mask = gaps < minimum_gap
+    close_count = int(np.count_nonzero(close_mask))
+    if close_count == 0:
+        return (
+            ordered,
+            [],
+            f"典型间距{typical_gap:.1f}px，最小可信间距{minimum_gap}px，无拥挤候选",
+        )
+
+    close_fraction = close_count / len(gaps)
+    if close_fraction > config.grid_black_column_close_gap_max_fraction:
+        return (
+            ordered,
+            [],
+            f"窄间距占{close_fraction:.1%}，在全表反复出现，视为真实密集列",
+        )
+
+    rejected_indices: set[int] = set()
+    rejected: list[RejectedColumnLine] = []
+    for gap_start, gap_end in _runs(close_mask):
+        # 一个拥挤簇包含 gap_start 到 gap_end 两端的候选线。只有连续两个
+        # 以上窄间距才足以说明它不是普通的列宽变化。
+        if gap_end - gap_start < 2:
+            continue
+        first_line_index = gap_start
+        last_line_index = gap_end
+        if positions[last_line_index] - positions[first_line_index] < minimum_gap:
+            continue
+        for line_index in range(first_line_index + 1, last_line_index):
+            rejected_indices.add(line_index)
+            rejected.append(
+                RejectedColumnLine(
+                    line=ordered[line_index],
+                    reason="位于孤立拥挤候选簇内部，会连续制造异常窄列",
+                    left_gap=int(gaps[line_index - 1]),
+                    right_gap=int(gaps[line_index]),
+                    typical_gap=typical_gap,
+                    minimum_gap=minimum_gap,
+                )
+            )
+
+    kept = [
+        line for index, line in enumerate(ordered) if index not in rejected_indices
+    ]
+    message = (
+        f"原始{len(ordered)}根，典型间距{typical_gap:.1f}px，"
+        f"最小可信间距{minimum_gap}px，删除{len(rejected)}根孤立拥挤候选"
+    )
+    return kept, rejected, message
+
+
 def _map_centers(
     centers: list[int],
     preview_length: int,
@@ -384,7 +501,7 @@ def detect_v6_grid(
         0,
         config.grid_black_line_ratio,
     )
-    black_columns = adaptive_line_segments(
+    raw_black_columns = adaptive_line_segments(
         black_ink,
         black_envelope,
         1,
@@ -394,6 +511,9 @@ def detect_v6_grid(
         minimum_contrast=config.grid_black_column_min_contrast,
         contrast_offset_scale=resolution_ratio,
         contrast_bypass_ratio=config.grid_black_column_contrast_bypass_ratio,
+    )
+    black_columns, rejected_black_columns, column_cleanup = (
+        clean_suspicious_column_lines(raw_black_columns, config)
     )
 
     # 白带分支以及它的交叉线擦除继续完全依据 20% 图自身结果，不能让
@@ -471,16 +591,19 @@ def detect_v6_grid(
     )
     if not row_centers or not column_centers:
         diagnostics = V6GridDiagnostics(
-            row_source,
-            column_source,
-            tuple(black_rows),
-            tuple(black_columns),
-            tuple(white_rows),
-            tuple(white_columns),
-            row_black_reason,
-            column_black_reason,
-            tuple(white_black_rows),
-            tuple(white_black_columns),
+            row_source=row_source,
+            column_source=column_source,
+            black_rows=tuple(black_rows),
+            black_columns=tuple(raw_black_columns),
+            white_rows=tuple(white_rows),
+            white_columns=tuple(white_columns),
+            row_reliability=row_black_reason,
+            column_reliability=column_black_reason,
+            black_rows_at_whitespace_scale=tuple(white_black_rows),
+            black_columns_at_whitespace_scale=tuple(white_black_columns),
+            used_black_columns=tuple(black_columns),
+            rejected_black_columns=tuple(rejected_black_columns),
+            column_cleanup=column_cleanup,
         )
         return GridStructure("unavailable", (), ()), diagnostics
 
@@ -498,6 +621,28 @@ def detect_v6_grid(
         source_region.width,
         include_outer=not column_is_black,
     )
+    raw_columns = (
+        _map_centers(
+            [line.position for line in raw_black_columns],
+            black_image.width,
+            source_region.x1,
+            source_region.width,
+            include_outer=False,
+        )
+        if column_is_black
+        else ()
+    )
+    rejected_columns = (
+        _map_centers(
+            [item.line.position for item in rejected_black_columns],
+            black_image.width,
+            source_region.x1,
+            source_region.width,
+            include_outer=False,
+        )
+        if column_is_black
+        else ()
+    )
     row_cells_ok, row_cell_reason = _boundaries_have_reasonable_cells(
         rows, config.grid_max_cell_span_ratio
     )
@@ -505,20 +650,34 @@ def detect_v6_grid(
         columns, config.grid_max_cell_span_ratio
     )
     diagnostics = V6GridDiagnostics(
-        row_source,
-        column_source,
-        tuple(black_rows),
-        tuple(black_columns),
-        tuple(white_rows),
-        tuple(white_columns),
-        f"{row_black_reason}；{row_cell_reason}",
-        f"{column_black_reason}；{column_cell_reason}",
-        tuple(white_black_rows),
-        tuple(white_black_columns),
+        row_source=row_source,
+        column_source=column_source,
+        black_rows=tuple(black_rows),
+        black_columns=tuple(raw_black_columns),
+        white_rows=tuple(white_rows),
+        white_columns=tuple(white_columns),
+        row_reliability=f"{row_black_reason}；{row_cell_reason}",
+        column_reliability=f"{column_black_reason}；{column_cell_reason}",
+        black_rows_at_whitespace_scale=tuple(white_black_rows),
+        black_columns_at_whitespace_scale=tuple(white_black_columns),
+        used_black_columns=tuple(black_columns),
+        rejected_black_columns=tuple(rejected_black_columns),
+        column_cleanup=column_cleanup,
     )
     if len(rows) < 2 or len(columns) < 2 or not row_cells_ok or not column_cells_ok:
-        return GridStructure("unavailable", (), ()), diagnostics
+        return (
+            GridStructure(
+                "unavailable", (), (), raw_columns, rejected_columns
+            ),
+            diagnostics,
+        )
     return (
-        GridStructure(f"v6:rows={row_source};columns={column_source}", rows, columns),
+        GridStructure(
+            source=f"v6:rows={row_source};columns={column_source}",
+            row_boundaries=rows,
+            column_boundaries=columns,
+            raw_column_boundaries=raw_columns,
+            rejected_column_boundaries=rejected_columns,
+        ),
         diagnostics,
     )

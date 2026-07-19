@@ -60,6 +60,13 @@ class TableConfig:
     grid_black_column_line_ratio: float = 0.95
     grid_black_column_endpoint_trim_ratio: float = 0.05
     grid_black_column_min_contrast: float = 30.0
+    # 压字伪线常会在局部制造一串远小于全表典型列宽的窄格。V6 使用该
+    # 比例做自适应复核，固定像素上限仍沿用 grid_min_cell_size，避免
+    # 密集小表被统一按 18 像素误删。
+    grid_black_column_min_gap_ratio: float = 0.60
+    # 若窄间距在全表所占比例超过该值，它更像真实的密集列规格而非孤立
+    # 压字误检，此时整张表不执行候选清理。
+    grid_black_column_close_gap_max_fraction: float = 0.12
     # 竖线若已有至少 98% 的绝对黑像素覆盖率，本身足以说明它是一条连续
     # 物理线，此时不再让容易受邻近底色影响的灰度对比规则误杀。
     grid_black_column_contrast_bypass_ratio: float = 0.98
@@ -89,7 +96,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v18-api-140-cell-tiles"
+    pipeline_version: str = "table-v19-adaptive-column-cleanup"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -152,6 +159,12 @@ class TableConfig:
             )
         if self.grid_black_column_min_contrast < 0:
             raise ValueError("grid_black_column_min_contrast 不能小于 0")
+        if not 0 < self.grid_black_column_min_gap_ratio < 1:
+            raise ValueError("竖线最小间距比例必须位于 (0, 1) 内")
+        if not 0 < self.grid_black_column_close_gap_max_fraction <= 1:
+            raise ValueError(
+                "竖线窄间距占比上限必须位于 (0, 1] 内"
+            )
         if self.grid_reliable_line_count < 1:
             raise ValueError("grid_reliable_line_count 至少为 1")
         if not 0 <= self.grid_interior_margin_ratio < 0.5:
