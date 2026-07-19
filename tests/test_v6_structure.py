@@ -48,9 +48,7 @@ class V6StructureTest(unittest.TestCase):
         ink = gray < 225
         envelope = np.ones_like(ink)
 
-        loose = adaptive_line_segments(
-            ink, envelope, axis=1, minimum_ratio=0.90
-        )
+        loose = adaptive_line_segments(ink, envelope, axis=1, minimum_ratio=0.90)
         strict = adaptive_line_segments(
             ink,
             envelope,
@@ -64,7 +62,9 @@ class V6StructureTest(unittest.TestCase):
         self.assertIn(20, [line.position for line in loose])
         self.assertEqual([line.position for line in strict], [10])
 
-    def test_each_direction_can_choose_black_line_or_whitespace_separately(self) -> None:
+    def test_each_direction_can_choose_black_line_or_whitespace_separately(
+        self,
+    ) -> None:
         image = Image.new("RGB", (600, 420), "white")
         draw = ImageDraw.Draw(image)
         # 横向有 6 条完整黑线，应走 90% 黑线；列方向只有文字块，应走白带。
@@ -80,13 +80,30 @@ class V6StructureTest(unittest.TestCase):
             TableConfig(),
         )
 
-        self.assertTrue(grid.available)
+        self.assertTrue(grid.available, diagnostics.to_dict())
         self.assertTrue(diagnostics.row_source.startswith("black-line"))
         self.assertEqual(diagnostics.column_source, "white-band")
         self.assertEqual(grid.row_boundaries[0], 2200)
         self.assertEqual(grid.row_boundaries[-1], 5960)
         self.assertEqual(grid.column_boundaries[0], 1000)
         self.assertEqual(grid.column_boundaries[-1], 7000)
+
+    def test_edge_only_black_lines_are_not_accepted_as_black_grid(self) -> None:
+        """两侧边缘线再多，也不能伪装成中间存在物理列的正常表格。"""
+
+        image = Image.new("RGB", (600, 420), "white")
+        draw = ImageDraw.Draw(image)
+        for y in (20, 95, 170, 245, 320, 395):
+            draw.line((0, y, 599, y), fill="black", width=2)
+        for x in (3, 7, 11, 588, 592, 596):
+            draw.line((x, 0, x, 419), fill="black", width=1)
+        grid, diagnostics = detect_v6_grid(
+            image,
+            Box(0, 0, 6000, 4200),
+            TableConfig(grid_black_column_min_contrast=0),
+        )
+        self.assertEqual(diagnostics.column_source, "white-band")
+        self.assertIn("中部没有物理边界", diagnostics.column_reliability)
 
 
 if __name__ == "__main__":

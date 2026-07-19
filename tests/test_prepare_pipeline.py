@@ -28,7 +28,7 @@ class PreparePipelineTest(unittest.TestCase):
                 backend="pillow",
                 detector="projection",
                 preview_max_side=800,
-                max_vlm_side=700,
+                max_vlm_side=800,
                 projection_min_line_ratio=0.5,
             )
             pipeline = TablePipeline(config, root / "work")
@@ -57,9 +57,10 @@ class PreparePipelineTest(unittest.TestCase):
             image.save(input_dir / "grid.png")
 
             config = TableConfig(
-                backend="pillow", detector="projection",
-                preview_max_side=1000, max_vlm_side=512,
-                single_tile_min_scale=0.65,
+                backend="pillow",
+                detector="projection",
+                preview_max_side=1000,
+                max_vlm_side=512,
                 projection_min_line_ratio=0.5,
                 grid_analysis_max_side=1000,
                 grid_line_min_ratio=0.8,
@@ -72,14 +73,19 @@ class PreparePipelineTest(unittest.TestCase):
             prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
             region = prepared["regions"][0]
             self.assertEqual(region["grid_source"], "ruled-lines")
-            self.assertTrue(all(not tile["header_context_rows"] for tile in region["tiles"]))
-            self.assertTrue(all(not tile["stub_context_columns"] for tile in region["tiles"]))
+            self.assertTrue(
+                all(not tile["header_context_rows"] for tile in region["tiles"])
+            )
+            self.assertTrue(
+                all(not tile["stub_context_columns"] for tile in region["tiles"])
+            )
             for tile in region["tiles"]:
                 tile_path = prepared_path.parent / "tiles" / tile["file_name"]
                 with Image.open(tile_path) as output:
                     expected = (tile["output_width"], tile["output_height"])
                     self.assertEqual(output.size, expected)
                     self.assertLessEqual(max(output.size), 512)
+                    self.assertEqual(tile["scale"], 1.0)
 
 
 if __name__ == "__main__":

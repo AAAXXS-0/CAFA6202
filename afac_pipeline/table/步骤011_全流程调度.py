@@ -43,7 +43,6 @@ from .步骤005_黑线白带结构检测 import (
 )
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
-from .步骤007_像素重叠切块 import plan_region_tiles
 from ..common.vlm_client import (
     CHAT_PROTOCOL,
     FinixDocClient,
@@ -52,6 +51,10 @@ from ..common.vlm_client import (
 
 
 PROMPT_VERSION = "table-physical-grid-v5-quality-gate"
+
+
+class TablePreprocessingError(RuntimeError):
+    """物理网格不可信或无法原尺寸切块时立即终止预处理。"""
 
 
 def _json_dump(path: Path, value: Any) -> None:
@@ -364,16 +367,19 @@ class TablePipeline:
     ) -> None:
         """保存普通裁片，或拼出“左上角 + 表头 + 行名列 + 主体”图片。"""
 
+        if plan.scale != 1.0:
+            raise TablePreprocessingError(
+                f"正式图表切片禁止缩放，但计划中的 scale={plan.scale}"
+            )
         if plan.header_context_rows == 0 and plan.stub_context_columns == 0:
-            self.backend.save_crop(image_path, plan.source_box, output_path, plan.scale)
+            self.backend.save_crop(image_path, plan.source_box, output_path)
             with Image.open(output_path) as source:
                 tile = source.convert("RGB").copy()
             if tile.size != (plan.output_width, plan.output_height):
-                tile = tile.resize(
-                    (plan.output_width, plan.output_height),
-                    Image.Resampling.LANCZOS,
+                raise TablePreprocessingError(
+                    f"实际裁片尺寸{tile.size}与计划尺寸"
+                    f"{(plan.output_width, plan.output_height)}不一致；禁止自动缩放修正"
                 )
-                tile.save(output_path, format="PNG", optimize=True)
             return
         with TemporaryDirectory(dir=output_path.parent) as temporary:
             temporary_dir = Path(temporary)
@@ -418,9 +424,9 @@ class TablePipeline:
                 )
                 canvas.paste(crop("corner", corner_box), (0, 0))
             if canvas.size != (plan.output_width, plan.output_height):
-                canvas = canvas.resize(
-                    (plan.output_width, plan.output_height),
-                    Image.Resampling.LANCZOS,
+                raise TablePreprocessingError(
+                    f"上下文拼接尺寸{canvas.size}与计划尺寸"
+                    f"{(plan.output_width, plan.output_height)}不一致；禁止自动缩放修正"
                 )
             output_path.parent.mkdir(parents=True, exist_ok=True)
             canvas.save(output_path, format="PNG", optimize=True)
@@ -545,14 +551,20 @@ class TablePipeline:
         if isinstance(self.detector, InkTableDetector):
             self._save_v6_detection_debug(preview, image_dir)
         if not detected:
-            # 两套检测都失败时，保守地把整图作为一个区域，保证不漏文件。
-            detected = [
-                DetectedBox(
-                    Box(0, 0, meta.width, meta.height),
-                    confidence=0.0,
-                    source="whole-image-fallback",
-                )
-            ]
+            error_path = image_dir / "预处理致命错误.json"
+            _json_dump(
+                error_path,
+                {
+                    "image_name": image_path.name,
+                    "stage": "分表",
+                    "reason": "没有检测到任何表格区域",
+                    "diagnostic_directory": str(image_dir.resolve()),
+                },
+            )
+            raise TablePreprocessingError(
+                f"{image_path.name} 图表预处理失败：没有检测到任何表格区域；"
+                f"诊断：{error_path.resolve()}"
+            )
         self._draw_preview_boxes(preview, detected, meta).save(
             image_dir / "preview_detected.png", format="PNG", optimize=True
         )
@@ -561,42 +573,101 @@ class TablePipeline:
         for region_index, item in enumerate(detected):
             region_box = item.box
             grid = self._analyze_grid(image_path, region_box, region_index, image_dir)
-            plans = []
-            if grid.available:
-                region_box = Box(
-                    grid.column_boundaries[0],
-                    grid.row_boundaries[0],
-                    grid.column_boundaries[-1],
-                    grid.row_boundaries[-1],
+            if not grid.available:
+                error_path = image_dir / "预处理致命错误.json"
+                _json_dump(
+                    error_path,
+                    {
+                        "image_name": image_path.name,
+                        "stage": "物理网格检测",
+                        "region_index": region_index,
+                        "region_box": region_box.to_dict(),
+                        "grid_source": grid.source,
+                        "reason": "没有同时得到可信的行边界和列边界",
+                        "boundary_image": str(
+                            (
+                                image_dir
+                                / "grid_analysis"
+                                / f"region_{region_index:03d}_boundaries.png"
+                            ).resolve()
+                        ),
+                        "diagnostics": str(
+                            (
+                                image_dir
+                                / "grid_analysis"
+                                / f"region_{region_index:03d}_diagnostics.json"
+                            ).resolve()
+                        ),
+                    },
                 )
-                plans = plan_grid_tiles(
-                    region_box,
-                    region_index,
-                    grid.row_boundaries,
-                    grid.column_boundaries,
-                    self.config.max_vlm_side,
-                    self.config.single_tile_min_scale,
-                    self.config.repeat_header_rows,
-                    self.config.repeat_stub_columns,
-                    self.config.max_logical_cells_per_tile,
-                    self.config.preferred_min_logical_cells_per_tile,
-                    self.config.max_tile_aspect_ratio,
+                raise TablePreprocessingError(
+                    f"{image_path.name} 的表格区域 {region_index} 没有可信的 R×C 物理网格；"
+                    f"禁止缩放或像素兜底。诊断：{error_path.resolve()}"
                 )
+            region_box = Box(
+                grid.column_boundaries[0],
+                grid.row_boundaries[0],
+                grid.column_boundaries[-1],
+                grid.row_boundaries[-1],
+            )
+            plans = plan_grid_tiles(
+                region_box,
+                region_index,
+                grid.row_boundaries,
+                grid.column_boundaries,
+                self.config.max_vlm_side,
+                self.config.repeat_header_rows,
+                self.config.repeat_stub_columns,
+                self.config.max_logical_cells_per_tile,
+                self.config.preferred_min_logical_cells_per_tile,
+                self.config.max_tile_aspect_ratio,
+            )
             if not plans:
-                # 保留“检测到了边界但存在超大单元格”的原因，避免清单把它
-                # 与“完全没有发现边界”混为一谈。
-                fallback_source = (
-                    f"{grid.source}-unplannable" if grid.available else "unavailable"
+                row_sizes = [
+                    right - left
+                    for left, right in zip(grid.row_boundaries, grid.row_boundaries[1:])
+                ]
+                column_sizes = [
+                    right - left
+                    for left, right in zip(
+                        grid.column_boundaries, grid.column_boundaries[1:]
+                    )
+                ]
+                error_path = image_dir / "预处理致命错误.json"
+                _json_dump(
+                    error_path,
+                    {
+                        "image_name": image_path.name,
+                        "stage": "物理网格切块",
+                        "region_index": region_index,
+                        "region_box": region_box.to_dict(),
+                        "grid_source": grid.source,
+                        "physical_shape": [grid.row_count, grid.column_count],
+                        "largest_row_height": max(row_sizes, default=0),
+                        "largest_column_width": max(column_sizes, default=0),
+                        "max_allowed_side": self.config.max_vlm_side,
+                        "reason": "无法只沿物理网格边界切出尺寸合规的原尺寸图片",
+                        "boundary_image": str(
+                            (
+                                image_dir
+                                / "grid_analysis"
+                                / f"region_{region_index:03d}_boundaries.png"
+                            ).resolve()
+                        ),
+                        "diagnostics": str(
+                            (
+                                image_dir
+                                / "grid_analysis"
+                                / f"region_{region_index:03d}_diagnostics.json"
+                            ).resolve()
+                        ),
+                    },
                 )
-                grid = GridStructure(
-                    fallback_source, grid.row_boundaries, grid.column_boundaries
-                )
-                plans = plan_region_tiles(
-                    region_box,
-                    region_index,
-                    self.config.max_vlm_side,
-                    self.config.tile_overlap,
-                    self.config.single_tile_min_scale,
+                raise TablePreprocessingError(
+                    f"{image_path.name} 的表格区域 {region_index} 虽有 {grid.row_count}×{grid.column_count} 网格，"
+                    f"但无法原尺寸切块；最大行高={max(row_sizes, default=0)}，"
+                    f"最大列宽={max(column_sizes, default=0)}，上限={self.config.max_vlm_side}。"
+                    f"这表示前置网格有误；诊断：{error_path.resolve()}"
                 )
             for plan in plans:
                 self._save_tile(

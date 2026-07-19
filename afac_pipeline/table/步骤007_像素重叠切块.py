@@ -7,7 +7,9 @@ import math
 from ..common.models import Box, TilePlan
 
 
-def _axis_segments(length: int, tile_length: int, overlap: int) -> list[tuple[int, int]]:
+def _axis_segments(
+    length: int, tile_length: int, overlap: int
+) -> list[tuple[int, int]]:
     """用最少块覆盖一条轴，并尽量保留目标重叠。
 
     当最少块无法同时容纳目标重叠时，自动降低重叠；不会为了满足重叠而
@@ -21,9 +23,7 @@ def _axis_segments(length: int, tile_length: int, overlap: int) -> list[tuple[in
     count = math.ceil(length / tile_length)
     maximum_overlap = max(0, (count * tile_length - length) // (count - 1))
     actual_overlap = min(overlap, maximum_overlap)
-    segment_length = math.ceil(
-        (length + (count - 1) * actual_overlap) / count
-    )
+    segment_length = math.ceil((length + (count - 1) * actual_overlap) / count)
     stride = segment_length - actual_overlap
     segments: list[tuple[int, int]] = []
     for index in range(count):
@@ -38,30 +38,11 @@ def plan_region_tiles(
     region_index: int,
     max_side: int,
     overlap: int,
-    single_tile_min_scale: float,
 ) -> list[TilePlan]:
-    """规划切片。
+    """历史像素切片工具：只原尺寸裁切，不再提供任何缩放功能。
 
-    中等尺寸表格优先整体等比缩小，避免破坏表格拓扑；缩放比例过低时才进行
-    二维切片。切片坐标始终保留在原图坐标系中，便于后续审计和重新切图。
+    正式流程已经禁止调用本函数；它只为旧实验和坐标回归测试保留。
     """
-
-    whole_scale = min(1.0, max_side / max(region.width, region.height))
-    if whole_scale >= single_tile_min_scale:
-        return [
-            TilePlan(
-                region_index=region_index,
-                row_index=0,
-                column_index=0,
-                row_count=1,
-                column_count=1,
-                source_box=region,
-                output_width=max(1, round(region.width * whole_scale)),
-                output_height=max(1, round(region.height * whole_scale)),
-                scale=whole_scale,
-                file_name=f"region_{region_index:03d}_r000_c000.png",
-            )
-        ]
 
     x_segments = _axis_segments(region.width, max_side, overlap)
     y_segments = _axis_segments(region.height, max_side, overlap)

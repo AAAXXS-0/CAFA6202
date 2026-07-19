@@ -47,7 +47,7 @@ class RecognizePipelineTest(unittest.TestCase):
                 backend="pillow",
                 detector="projection",
                 preview_max_side=800,
-                max_vlm_side=700,
+                max_vlm_side=800,
                 projection_min_line_ratio=0.5,
             )
             pipeline = TablePipeline(config, root / "work")

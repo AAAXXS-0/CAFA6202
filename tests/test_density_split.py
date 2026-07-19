@@ -44,6 +44,26 @@ class DensitySplitTest(unittest.TestCase):
         self.assertFalse(vertical)
         self.assertEqual(len(boxes), 7)
 
+    def test_two_pixel_extremely_clear_gap_with_strong_support_is_kept(self) -> None:
+        """5% 密度图中的 2 像素真空带不能因固定 3 像素门槛漏掉。"""
+
+        density = np.full((384, 272), 0.36, dtype=np.float32)
+        density[180:182, :] = 0.004
+        horizontal, vertical = find_density_bands(density)
+        boxes = boxes_from_bands(272, 384, horizontal, vertical, density)
+        self.assertEqual(len(horizontal), 1)
+        self.assertFalse(vertical)
+        self.assertEqual(len(boxes), 2)
+
+    def test_two_pixel_ordinary_cell_gap_is_still_rejected(self) -> None:
+        """较淡或上下支撑较弱的 2 像素带仍不能触发分表。"""
+
+        density = np.full((384, 272), 0.08, dtype=np.float32)
+        density[180:182, :] = 0.004
+        horizontal, vertical = find_density_bands(density)
+        self.assertFalse(horizontal)
+        self.assertFalse(vertical)
+
     def test_dense_periodic_cell_gaps_are_not_used_to_split_tables(self) -> None:
         """间距很密的重复空隙属于表内列，不应产生大量窄表块。"""
 

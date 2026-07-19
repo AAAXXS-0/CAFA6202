@@ -45,6 +45,8 @@ class V6GridDiagnostics:
     black_columns: tuple[LineSegment, ...]
     white_rows: tuple[int, ...]
     white_columns: tuple[int, ...]
+    row_reliability: str = ""
+    column_reliability: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -54,6 +56,8 @@ class V6GridDiagnostics:
             "black_columns": [line.__dict__ for line in self.black_columns],
             "white_rows": list(self.white_rows),
             "white_columns": list(self.white_columns),
+            "row_reliability": self.row_reliability,
+            "column_reliability": self.column_reliability,
         }
 
 
@@ -124,7 +128,10 @@ def detect_v6_regions(preview: Image.Image, config: TableConfig) -> V6RegionResu
             preview.size,
         )
         split_boxes.append(split_box)
-        local_ink = gray[split_box.y1:split_box.y2, split_box.x1:split_box.x2] < config.ink_threshold
+        local_ink = (
+            gray[split_box.y1 : split_box.y2, split_box.x1 : split_box.x2]
+            < config.ink_threshold
+        )
         local = dense_content_box(local_ink)
         analysis_boxes.append(
             Box(
@@ -189,9 +196,7 @@ def adaptive_line_segments(
 
     data = black_ink if axis == 0 else black_ink.T
     envelope = envelope_mask if axis == 0 else envelope_mask.T
-    gray_data = None if grayscale is None else (
-        grayscale if axis == 0 else grayscale.T
-    )
+    gray_data = None if grayscale is None else (grayscale if axis == 0 else grayscale.T)
     scores = np.zeros(len(data), dtype=np.float32)
     starts = np.zeros(len(data), dtype=np.int32)
     ends = np.zeros(len(data), dtype=np.int32)
@@ -221,9 +226,7 @@ def adaptive_line_segments(
             if not shoulder_indices:
                 scores[index] = 0.0
                 continue
-            center_mean = float(
-                gray_data[index, measure_start:measure_end].mean()
-            )
+            center_mean = float(gray_data[index, measure_start:measure_end].mean())
             shoulder_mean = float(
                 gray_data[shoulder_indices, measure_start:measure_end].mean()
             )
@@ -243,21 +246,80 @@ def adaptive_line_segments(
 
 
 def _map_centers(
-    centers: list[int], preview_length: int, source_start: int, source_length: int,
-    *, include_outer: bool,
+    centers: list[int],
+    preview_length: int,
+    source_start: int,
+    source_length: int,
+    *,
+    include_outer: bool,
 ) -> tuple[int, ...]:
     """映射检测边界；只有白带模式才使用内容框外沿补齐首尾。"""
 
     detected = sorted(set(centers))
     local = [0, *detected, preview_length] if include_outer else detected
     mapped = [
-        source_start + round(value * source_length / preview_length)
-        for value in local
+        source_start + round(value * source_length / preview_length) for value in local
     ]
     if include_outer:
         mapped[0] = source_start
         mapped[-1] = source_start + source_length
     return tuple(dict.fromkeys(mapped))
+
+
+def _erase_perpendicular_lines(
+    ink: np.ndarray, lines: list[LineSegment], axis: int
+) -> np.ndarray:
+    """找另一方向白带前，擦掉已经确认的交叉表格线。
+
+    例如横线可靠、竖线缺失时，完整横线会让每一列都带少量黑像素，直接找
+    纵向白带就会失败。这里只在已确认线的有效跨度内擦除很窄的一条，不碰
+    其余文字墨迹。
+    """
+
+    result = ink.copy()
+    radius = max(1, round(min(ink.shape) * 0.001))
+    for line in lines:
+        lower = max(0, line.position - radius)
+        upper = min(ink.shape[axis], line.position + radius + 1)
+        if axis == 0:
+            result[lower:upper, line.start : line.end] = False
+        else:
+            result[line.start : line.end, lower:upper] = False
+    return result
+
+
+def _black_lines_are_distributed(
+    lines: list[LineSegment],
+    length: int,
+    minimum_count: int,
+    interior_margin_ratio: float,
+) -> tuple[bool, str]:
+    """判断黑线数量和空间分布是否都像真实网格，而不是两侧边框。"""
+
+    if len(lines) < minimum_count:
+        return False, f"黑线只有{len(lines)}根，少于{minimum_count}根"
+    margin = length * interior_margin_ratio
+    interior = [line for line in lines if margin < line.position < length - margin]
+    if not interior:
+        return False, "黑线全部挤在表格两侧，中部没有物理边界"
+    return True, f"{len(lines)}根黑线，含{len(interior)}根中部边界"
+
+
+def _boundaries_have_reasonable_cells(
+    boundaries: tuple[int, ...], maximum_span_ratio: float
+) -> tuple[bool, str]:
+    """拒绝某一格吞掉整张表的荒谬边界，避免错误网格流入切块。"""
+
+    if len(boundaries) < 2:
+        return False, "没有形成至少一个逻辑格"
+    total = boundaries[-1] - boundaries[0]
+    if total <= 0:
+        return False, "边界总跨度为零"
+    maximum = max(right - left for left, right in zip(boundaries, boundaries[1:]))
+    ratio = maximum / total
+    if ratio > maximum_span_ratio:
+        return False, f"最大逻辑格占该方向{ratio:.1%}，超过{maximum_span_ratio:.0%}"
+    return True, f"最大逻辑格占该方向{ratio:.1%}"
 
 
 def detect_v6_grid(
@@ -270,9 +332,7 @@ def detect_v6_grid(
     gray = np.asarray(analysis_image.convert("L"))
     ink = gray < config.grid_white_threshold
     envelope = content_envelope_mask(ink)
-    black_rows = adaptive_line_segments(
-        ink, envelope, 0, config.grid_black_line_ratio
-    )
+    black_rows = adaptive_line_segments(ink, envelope, 0, config.grid_black_line_ratio)
     black_columns = adaptive_line_segments(
         ink,
         envelope,
@@ -282,17 +342,76 @@ def detect_v6_grid(
         endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
         minimum_contrast=config.grid_black_column_min_contrast,
     )
-    white_rows, white_columns = _whitespace_centers(ink, config)
     reliable = config.grid_reliable_line_count
-    row_is_black = len(black_rows) >= reliable
-    column_is_black = len(black_columns) >= reliable
+    row_is_black, row_black_reason = _black_lines_are_distributed(
+        black_rows,
+        analysis_image.height,
+        reliable,
+        config.grid_interior_margin_ratio,
+    )
+    column_is_black, column_black_reason = _black_lines_are_distributed(
+        black_columns,
+        analysis_image.width,
+        reliable,
+        config.grid_interior_margin_ratio,
+    )
+    # 某个方向使用白带兜底时，先擦掉另一方向已经确认的黑线。否则水平
+    # 表格线会贯穿所有列（或竖线贯穿所有行），把真实白带堵死。
+    ink_for_rows = (
+        _erase_perpendicular_lines(ink, black_columns, axis=1)
+        if column_is_black
+        else ink
+    )
+    ink_for_columns = (
+        _erase_perpendicular_lines(ink, black_rows, axis=0) if row_is_black else ink
+    )
+    white_rows = _whitespace_centers(ink_for_rows, config)[0]
+    white_columns = _whitespace_centers(ink_for_columns, config)[1]
     row_centers = [line.position for line in black_rows] if row_is_black else white_rows
-    column_centers = [line.position for line in black_columns] if column_is_black else white_columns
-    row_source = f"black-line-{config.grid_black_line_ratio:.2f}" if row_is_black else "white-band"
+    column_centers = (
+        [line.position for line in black_columns] if column_is_black else white_columns
+    )
+    row_source = (
+        f"black-line-{config.grid_black_line_ratio:.2f}"
+        if row_is_black
+        else "white-band"
+    )
     column_source = (
         f"black-line-{config.grid_black_column_line_ratio:.2f}-contrast"
         if column_is_black
         else "white-band"
+    )
+    if not row_centers or not column_centers:
+        diagnostics = V6GridDiagnostics(
+            row_source,
+            column_source,
+            tuple(black_rows),
+            tuple(black_columns),
+            tuple(white_rows),
+            tuple(white_columns),
+            row_black_reason,
+            column_black_reason,
+        )
+        return GridStructure("unavailable", (), ()), diagnostics
+    rows = _map_centers(
+        row_centers,
+        analysis_image.height,
+        source_region.y1,
+        source_region.height,
+        include_outer=not row_is_black,
+    )
+    columns = _map_centers(
+        column_centers,
+        analysis_image.width,
+        source_region.x1,
+        source_region.width,
+        include_outer=not column_is_black,
+    )
+    row_cells_ok, row_cell_reason = _boundaries_have_reasonable_cells(
+        rows, config.grid_max_cell_span_ratio
+    )
+    column_cells_ok, column_cell_reason = _boundaries_have_reasonable_cells(
+        columns, config.grid_max_cell_span_ratio
     )
     diagnostics = V6GridDiagnostics(
         row_source,
@@ -301,22 +420,12 @@ def detect_v6_grid(
         tuple(black_columns),
         tuple(white_rows),
         tuple(white_columns),
+        f"{row_black_reason}；{row_cell_reason}",
+        f"{column_black_reason}；{column_cell_reason}",
     )
-    if not row_centers or not column_centers:
-        return GridStructure("unavailable", (), ()), diagnostics
-    rows = _map_centers(
-        row_centers, analysis_image.height, source_region.y1, source_region.height,
-        include_outer=not row_is_black,
-    )
-    columns = _map_centers(
-        column_centers, analysis_image.width, source_region.x1, source_region.width,
-        include_outer=not column_is_black,
-    )
-    if len(rows) < 2 or len(columns) < 2:
+    if len(rows) < 2 or len(columns) < 2 or not row_cells_ok or not column_cells_ok:
         return GridStructure("unavailable", (), ()), diagnostics
     return (
-        GridStructure(
-            f"v6:rows={row_source};columns={column_source}", rows, columns
-        ),
+        GridStructure(f"v6:rows={row_source};columns={column_source}", rows, columns),
         diagnostics,
     )

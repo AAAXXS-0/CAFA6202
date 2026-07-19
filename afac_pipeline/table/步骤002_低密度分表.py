@@ -59,14 +59,14 @@ def _profile_bands(
     content_density: float,
     maximum_band_mean: float,
     support_ratio: float,
+    narrow_band_maximum_mean: float,
+    narrow_band_content_density: float,
 ) -> list[DensityBand]:
     length = len(profile)
     minimum_band = max(3, round(length * minimum_band_ratio))
     # 低清图中标题造成的中断通常只有 1～2 像素。超过 2 像素后更可能已经
     # 进入正文或相邻单元格，因此即使图片更长也不继续放宽。
-    maximum_interrupt = max(
-        1, min(2, round(length * maximum_interrupt_ratio))
-    )
+    maximum_interrupt = max(1, min(2, round(length * maximum_interrupt_ratio)))
     edge_margin = max(1, round(length * edge_margin_ratio))
     raw_low = profile <= maximum_density
     filled_low = _fill_short_interruptions(raw_low, maximum_interrupt)
@@ -79,8 +79,6 @@ def _profile_bands(
         range_sources.setdefault(item, set()).add("filled")
     bands: list[DensityBand] = []
     for (start, end), sources in sorted(range_sources.items()):
-        if end - start < minimum_band:
-            continue
         if start < edge_margin or end > length - edge_margin:
             continue
         # 上一步允许少量高密度位置（例如跨过空白区的表标题）把空白带短暂
@@ -95,8 +93,24 @@ def _profile_bands(
         after = profile[end : min(length, end + support)]
         if before.size == 0 or after.size == 0:
             continue
-        if float(before.mean()) < content_density or float(after.mean()) < content_density:
+        if (
+            float(before.mean()) < content_density
+            or float(after.mean()) < content_density
+        ):
             continue
+        band_width = end - start
+        if band_width < minimum_band:
+            # 5% 密度图会把真实表间空白压到 2 像素。不能无条件把最小宽度
+            # 降到 2，否则表内行距也会参与分表；只有“本身几乎全白，且上下
+            # 都有很强内容”的孤立窄带才放行。
+            exceptionally_clear = (
+                band_width >= 2
+                and band_mean <= narrow_band_maximum_mean
+                and float(before.mean()) >= narrow_band_content_density
+                and float(after.mean()) >= narrow_band_content_density
+            )
+            if not exceptionally_clear:
+                continue
         bands.append(
             DensityBand(
                 axis=axis,
@@ -149,10 +163,7 @@ def _select_axis_bands(
     groups = [
         group
         for group in groups
-        if not (
-            len(group) >= 3
-            and all("filled" not in band.source for band in group)
-        )
+        if not (len(group) >= 3 and all("filled" not in band.source for band in group))
     ]
     selected: list[DensityBand] = []
     for group in groups:
@@ -160,9 +171,7 @@ def _select_axis_bands(
         # 标题上方，让标题跟随下面的表。filled候选仍用于确认这是同一个
         # 宽分隔区，但不能再用它跨过标题后从整段中央落刀。
         raw_horizontal = [
-            band
-            for band in group
-            if band.axis == "horizontal" and band.source == "raw"
+            band for band in group if band.axis == "horizontal" and band.source == "raw"
         ]
         if raw_horizontal:
             selected.append(min(raw_horizontal, key=lambda band: band.start))
@@ -189,6 +198,8 @@ def find_density_bands(
     content_density: float = 0.03,
     maximum_band_mean: float = 0.015,
     support_ratio: float = 0.03,
+    narrow_band_maximum_mean: float = 0.005,
+    narrow_band_content_density: float = 0.20,
     cluster_ratio: float = 0.08,
     minimum_region_ratio: float = 0.12,
 ) -> tuple[list[DensityBand], list[DensityBand]]:
@@ -205,6 +216,8 @@ def find_density_bands(
         content_density=content_density,
         maximum_band_mean=maximum_band_mean,
         support_ratio=support_ratio,
+        narrow_band_maximum_mean=narrow_band_maximum_mean,
+        narrow_band_content_density=narrow_band_content_density,
     )
     columns = _profile_bands(
         density.mean(axis=0),
@@ -216,6 +229,8 @@ def find_density_bands(
         content_density=content_density,
         maximum_band_mean=maximum_band_mean,
         support_ratio=support_ratio,
+        narrow_band_maximum_mean=narrow_band_maximum_mean,
+        narrow_band_content_density=narrow_band_content_density,
     )
     coarse_max_side = max(density.shape)
     rows = _select_axis_bands(
@@ -229,9 +244,7 @@ def find_density_bands(
     minimum_band = max(3, round(len(row_profile) * minimum_band_ratio))
     adjusted_rows: list[DensityBand] = []
     for band in rows:
-        interruptions = _runs(
-            row_profile[band.start : band.end] > maximum_density
-        )
+        interruptions = _runs(row_profile[band.start : band.end] > maximum_density)
         if "filled" in band.source and interruptions:
             end = band.start + interruptions[0][0]
             if end - band.start >= minimum_band:
@@ -240,7 +253,7 @@ def find_density_bands(
                         "horizontal",
                         band.start,
                         end,
-                        float(row_profile[band.start:end].mean()),
+                        float(row_profile[band.start : end].mean()),
                         "raw-before-title",
                     )
                 )

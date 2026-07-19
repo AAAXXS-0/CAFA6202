@@ -10,7 +10,6 @@
   "table_analysis_max_side": 4608,
   "max_vlm_side": 3900,
   "tile_overlap": 160,
-  "single_tile_min_scale": 0.65,
   "table_box_padding_ratio": 0.015,
   "ink_coarse_max_side": 384,
   "ink_threshold": 225,
@@ -27,6 +26,8 @@
   "grid_black_column_endpoint_trim_ratio": 0.05,
   "grid_black_column_min_contrast": 30.0,
   "grid_reliable_line_count": 5,
+  "grid_interior_margin_ratio": 0.10,
+  "grid_max_cell_span_ratio": 0.95,
   "grid_min_cell_size": 18,
   "whitespace_blank_ratio": 0.01,
   "whitespace_min_band": 1,
@@ -42,5 +43,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v12-balanced-grid-tiles"
+  "pipeline_version": "table-v13-strict-physical-grid-no-resize"
 }

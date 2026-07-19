@@ -47,9 +47,13 @@ class TableGridTest(unittest.TestCase):
     def test_large_grid_repeats_header_and_stub_without_exceeding_limit(self) -> None:
         boundaries = tuple(range(0, 6001, 1000))
         plans = plan_grid_tiles(
-            Box(0, 0, 6000, 6000), 0, boundaries, boundaries,
-            max_side=3000, single_tile_min_scale=0.65,
-            repeat_header_rows=1, repeat_stub_columns=1,
+            Box(0, 0, 6000, 6000),
+            0,
+            boundaries,
+            boundaries,
+            max_side=3000,
+            repeat_header_rows=1,
+            repeat_stub_columns=1,
         )
         self.assertGreater(len(plans), 1)
         self.assertTrue(any(plan.header_context_rows == 1 for plan in plans))
@@ -61,9 +65,13 @@ class TableGridTest(unittest.TestCase):
         rows = tuple(range(0, 1001, 100))
         columns = tuple(range(0, 4001, 100))
         plans = plan_grid_tiles(
-            Box(0, 0, 4000, 1000), 0, rows, columns,
-            max_side=3900, single_tile_min_scale=0.65,
-            repeat_header_rows=0, repeat_stub_columns=0,
+            Box(0, 0, 4000, 1000),
+            0,
+            rows,
+            columns,
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
             max_logical_cells_per_tile=320,
         )
         self.assertGreater(len(plans), 1)
@@ -76,24 +84,35 @@ class TableGridTest(unittest.TestCase):
         self.assertEqual(TableConfig().max_logical_cells_per_tile, 280)
         boundaries = tuple(range(0, 1801, 100))
         plans = plan_grid_tiles(
-            Box(0, 0, 1800, 1800), 0, boundaries, boundaries,
-            max_side=3900, single_tile_min_scale=0.65,
-            repeat_header_rows=0, repeat_stub_columns=0,
+            Box(0, 0, 1800, 1800),
+            0,
+            boundaries,
+            boundaries,
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
         )
         self.assertGreater(len(plans), 1)
-        self.assertTrue(all(
-            (plan.logical_row_end - plan.logical_row_start)
-            * (plan.logical_column_end - plan.logical_column_start) <= 280
-            for plan in plans
-        ))
+        self.assertTrue(
+            all(
+                (plan.logical_row_end - plan.logical_row_start)
+                * (plan.logical_column_end - plan.logical_column_start)
+                <= 280
+                for plan in plans
+            )
+        )
 
     def test_balanced_split_avoids_small_remainder_tiles(self) -> None:
         rows = tuple(round(index * 350 / 23) for index in range(24))
         columns = tuple(round(index * 1315 / 24) for index in range(25))
         plans = plan_grid_tiles(
-            Box(0, 0, 1315, 350), 0, rows, columns,
-            max_side=3900, single_tile_min_scale=0.65,
-            repeat_header_rows=0, repeat_stub_columns=0,
+            Box(0, 0, 1315, 350),
+            0,
+            rows,
+            columns,
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
         )
         shapes = [
             (
@@ -108,9 +127,13 @@ class TableGridTest(unittest.TestCase):
         rows = tuple(round(index * 130 / 8) for index in range(9))
         columns = tuple(round(index * 1679 / 24) for index in range(25))
         plans = plan_grid_tiles(
-            Box(0, 0, 1679, 130), 0, rows, columns,
-            max_side=3900, single_tile_min_scale=0.65,
-            repeat_header_rows=0, repeat_stub_columns=0,
+            Box(0, 0, 1679, 130),
+            0,
+            rows,
+            columns,
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
         )
         shapes = [
             (
@@ -121,24 +144,72 @@ class TableGridTest(unittest.TestCase):
         ]
         self.assertEqual(shapes, [(8, 12), (8, 12)])
 
+    def test_oversized_physical_cell_returns_no_plan_instead_of_resizing(self) -> None:
+        """单个物理格超过上限说明网格错误，规划器必须交给上层报错。"""
+
+        plans = plan_grid_tiles(
+            Box(0, 0, 5904, 200),
+            0,
+            (0, 100, 200),
+            (0, 4604, 5904),
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
+        )
+
+        self.assertEqual(plans, [])
+
     def test_irregular_wide_columns_still_force_minimum_split_count(self) -> None:
         """即使某个逻辑列特别宽，整体细长表也不应退回单块。"""
 
         rows = (0, 10, 70, 85)
         columns = (
-            0, 10, 60, 100, 145, 190, 235, 275, 320, 365,
-            410, 465, 495, 570, 600, 694, 739, 784, 1529, 2268,
-            2308, 2353, 2398, 2528, 2573, 2618, 2663, 2708, 2758, 2768,
+            0,
+            10,
+            60,
+            100,
+            145,
+            190,
+            235,
+            275,
+            320,
+            365,
+            410,
+            465,
+            495,
+            570,
+            600,
+            694,
+            739,
+            784,
+            1529,
+            2268,
+            2308,
+            2353,
+            2398,
+            2528,
+            2573,
+            2618,
+            2663,
+            2708,
+            2758,
+            2768,
         )
         plans = plan_grid_tiles(
-            Box(0, 0, 2768, 85), 0, rows, columns,
-            max_side=3900, single_tile_min_scale=0.65,
-            repeat_header_rows=0, repeat_stub_columns=0,
+            Box(0, 0, 2768, 85),
+            0,
+            rows,
+            columns,
+            max_side=3900,
+            repeat_header_rows=0,
+            repeat_stub_columns=0,
         )
         self.assertGreaterEqual(len(plans), 5)
         self.assertTrue(all(plan.column_count > 1 for plan in plans))
 
-    def test_borderless_table_uses_whitespace_only_after_line_detection_fails(self) -> None:
+    def test_borderless_table_uses_whitespace_only_after_line_detection_fails(
+        self,
+    ) -> None:
         image = Image.new("RGB", (600, 420), "white")
         draw = ImageDraw.Draw(image)
         for y in (60, 145, 230, 315):

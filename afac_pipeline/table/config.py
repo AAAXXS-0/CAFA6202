@@ -31,6 +31,8 @@ class TableConfig:
     table_analysis_max_side: int = 4608
     max_vlm_side: int = 3900
     tile_overlap: int = 160
+    # 仅为兼容旧 manifest/config 保留。v13 起请求图片严禁缩放，这个值
+    # 不再参与任何切块决策；新配置文件不必再填写。
     single_tile_min_scale: float = 0.65
     table_box_padding_ratio: float = 0.015
     ink_coarse_max_side: int = 384
@@ -50,6 +52,10 @@ class TableConfig:
     grid_black_column_endpoint_trim_ratio: float = 0.05
     grid_black_column_min_contrast: float = 30.0
     grid_reliable_line_count: int = 5
+    # 黑线不能只靠“数量够多”就成为物理网格：至少要有一条边界处在表格
+    # 中部，且任何一个逻辑格都不能独占所在方向绝大部分长度。
+    grid_interior_margin_ratio: float = 0.10
+    grid_max_cell_span_ratio: float = 0.95
     grid_min_cell_size: int = 18
     whitespace_blank_ratio: float = 0.01
     whitespace_min_band: int = 1
@@ -70,7 +76,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v12-balanced-grid-tiles"
+    pipeline_version: str = "table-v13-strict-physical-grid-no-resize"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -89,8 +95,6 @@ class TableConfig:
             raise ValueError("max_vlm_side 应位于 512 到 4096 之间")
         if not 0 <= self.tile_overlap < self.max_vlm_side:
             raise ValueError("tile_overlap 必须小于 max_vlm_side")
-        if not 0 < self.single_tile_min_scale <= 1:
-            raise ValueError("single_tile_min_scale 必须位于 (0, 1] 内")
         if not 64 <= self.ink_coarse_max_side <= 2048:
             raise ValueError("ink_coarse_max_side 应位于 64 到 2048 之间")
         if not 0 <= self.ink_threshold <= 255:
@@ -121,6 +125,10 @@ class TableConfig:
             raise ValueError("grid_black_column_min_contrast 不能小于 0")
         if self.grid_reliable_line_count < 1:
             raise ValueError("grid_reliable_line_count 至少为 1")
+        if not 0 <= self.grid_interior_margin_ratio < 0.5:
+            raise ValueError("网格内部边界留白比例必须位于 [0, 0.5) 内")
+        if not 0 < self.grid_max_cell_span_ratio < 1:
+            raise ValueError("最大单元格跨度比例必须位于 (0, 1) 内")
         if not 0 <= self.whitespace_blank_ratio < 1:
             raise ValueError("whitespace_blank_ratio 必须位于 [0, 1) 内")
         if self.whitespace_min_band <= 0 or self.whitespace_dilate_ratio <= 0:
@@ -140,7 +148,8 @@ class TableConfig:
         if self.max_logical_cells_per_tile < 32:
             raise ValueError("单个图表切片的逻辑单元格上限至少为 32")
         if not (
-            1 <= self.preferred_min_logical_cells_per_tile
+            1
+            <= self.preferred_min_logical_cells_per_tile
             <= self.max_logical_cells_per_tile
         ):
             raise ValueError("优选最小逻辑格数必须位于 1 和单块上限之间")
@@ -162,8 +171,12 @@ class TableConfig:
     def digest(self) -> str:
         """缓存键使用稳定配置摘要，修改配置后不会误用旧结果。"""
 
-        payload = json.dumps(asdict(self), ensure_ascii=False, sort_keys=True).encode("utf-8")
+        config = asdict(self)
+        config.pop("single_tile_min_scale", None)
+        payload = json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        config = asdict(self)
+        config.pop("single_tile_min_scale", None)
+        return config

@@ -8,7 +8,9 @@ from ..common.models import Box, TilePlan
 
 
 def _axis_groups(
-    boundaries: tuple[int, ...], max_side: int, repeated_count: int,
+    boundaries: tuple[int, ...],
+    max_side: int,
+    repeated_count: int,
     maximum_logical_count: int | None = None,
 ) -> list[tuple[int, int, int]]:
     logical_count = len(boundaries) - 1
@@ -21,10 +23,7 @@ def _axis_groups(
         while (
             end <= logical_count
             and boundaries[end] - boundaries[start] <= available
-            and (
-                maximum_logical_count is None
-                or end - start <= maximum_logical_count
-            )
+            and (maximum_logical_count is None or end - start <= maximum_logical_count)
         ):
             end += 1
         end -= 1
@@ -91,28 +90,37 @@ def _balanced_grid_groups(
     row_options = [
         groups
         for count in range(1, logical_rows + 1)
-        if (groups := _balanced_axis_groups(
-            row_boundaries, max_side, repeat_header_rows, count
-        ))
+        if (
+            groups := _balanced_axis_groups(
+                row_boundaries, max_side, repeat_header_rows, count
+            )
+        )
     ]
     column_options = [
         groups
         for count in range(1, logical_columns + 1)
-        if (groups := _balanced_axis_groups(
-            column_boundaries, max_side, repeat_stub_columns, count
-        ))
+        if (
+            groups := _balanced_axis_groups(
+                column_boundaries, max_side, repeat_stub_columns, count
+            )
+        )
     ]
 
     best_score: tuple[int, int, int, int, float, int] | None = None
-    best_groups: tuple[
-        list[tuple[int, int, int]],
-        list[tuple[int, int, int]],
-    ] | None = None
+    best_groups: (
+        tuple[
+            list[tuple[int, int, int]],
+            list[tuple[int, int, int]],
+        ]
+        | None
+    ) = None
     for row_groups in row_options:
         row_counts = [end - start for start, end, _ in row_groups]
         row_heights = [
-            row_boundaries[end] - row_boundaries[start]
-            + row_boundaries[context] - row_boundaries[0]
+            row_boundaries[end]
+            - row_boundaries[start]
+            + row_boundaries[context]
+            - row_boundaries[0]
             for start, end, context in row_groups
         ]
         for column_groups in column_options:
@@ -120,8 +128,10 @@ def _balanced_grid_groups(
             if max(row_counts) * max(column_counts) > max_cells:
                 continue
             column_widths = [
-                column_boundaries[end] - column_boundaries[start]
-                + column_boundaries[context] - column_boundaries[0]
+                column_boundaries[end]
+                - column_boundaries[start]
+                + column_boundaries[context]
+                - column_boundaries[0]
                 for start, end, context in column_groups
             ]
             aspect_ratio = max(
@@ -142,9 +152,7 @@ def _balanced_grid_groups(
                 for row_count in row_counts
                 for column_count in column_counts
             ]
-            tiny_count = sum(
-                count < preferred_min_cells for count in cell_counts
-            )
+            tiny_count = sum(count < preferred_min_cells for count in cell_counts)
             narrow_count = sum(
                 min(row_count, column_count) < 8
                 for row_count in row_counts
@@ -164,22 +172,19 @@ def _balanced_grid_groups(
     return best_groups or ([], [])
 
 
-
-
 def plan_grid_tiles(
     region: Box,
     region_index: int,
     row_boundaries: tuple[int, ...],
     column_boundaries: tuple[int, ...],
     max_side: int,
-    single_tile_min_scale: float,
     repeat_header_rows: int,
     repeat_stub_columns: int,
     max_logical_cells_per_tile: int = 280,
     preferred_min_logical_cells_per_tile: int = 80,
     max_tile_aspect_ratio: float = 8.0,
 ) -> list[TilePlan]:
-    """优先整表缩放；必须切分时只在完整的逻辑行列边界落刀。"""
+    """只沿完整逻辑行列边界原尺寸切图，任何请求图片都不缩放。"""
 
     if (row_boundaries[0], row_boundaries[-1]) != (region.y1, region.y2):
         raise ValueError("行边界没有覆盖完整表格区域")
@@ -187,21 +192,24 @@ def plan_grid_tiles(
         raise ValueError("列边界没有覆盖完整表格区域")
     logical_rows = len(row_boundaries) - 1
     logical_columns = len(column_boundaries) - 1
-    whole_scale = min(1.0, max_side / max(region.width, region.height))
     logical_cell_count = logical_rows * logical_columns
-    whole_aspect_ratio = max(
-        region.width / region.height, region.height / region.width
-    )
+    whole_aspect_ratio = max(region.width / region.height, region.height / region.width)
     if (
-        whole_scale >= single_tile_min_scale
+        max(region.width, region.height) <= max_side
         and logical_cell_count <= max_logical_cells_per_tile
         and whole_aspect_ratio <= max_tile_aspect_ratio
     ):
         return [
             TilePlan(
-                region_index, 0, 0, 1, 1, region,
-                max(1, round(region.width * whole_scale)),
-                max(1, round(region.height * whole_scale)), whole_scale,
+                region_index,
+                0,
+                0,
+                1,
+                1,
+                region,
+                region.width,
+                region.height,
+                1.0,
                 f"region_{region_index:03d}_r000_c000.png",
                 logical_row_end=logical_rows,
                 logical_column_end=logical_columns,
@@ -221,13 +229,11 @@ def plan_grid_tiles(
         max_tile_aspect_ratio,
     )
     if not row_groups or not column_groups:
-        # 某些单元格本身就超过像素上限。均衡规划失败时保留旧贪心算法
-        # 作为最后兜底，若仍无法规划则由上层改用像素重叠切片。
-        row_cap = max(1, int(max_logical_cells_per_tile ** 0.5))
+        # 均衡规划找不到方案时，再试一次旧贪心规划；它仍然只能沿物理
+        # 网格落刀，不会缩图，也不会切开单元格。
+        row_cap = max(1, int(max_logical_cells_per_tile**0.5))
         column_cap = max(1, max_logical_cells_per_tile // row_cap)
-        row_groups = _axis_groups(
-            row_boundaries, max_side, repeat_header_rows, row_cap
-        )
+        row_groups = _axis_groups(row_boundaries, max_side, repeat_header_rows, row_cap)
         column_groups = _axis_groups(
             column_boundaries, max_side, repeat_stub_columns, column_cap
         )
@@ -235,18 +241,28 @@ def plan_grid_tiles(
         return []
     plans: list[TilePlan] = []
     for row_index, (row_start, row_end, header_rows) in enumerate(row_groups):
-        for column_index, (column_start, column_end, stub_columns) in enumerate(column_groups):
+        for column_index, (column_start, column_end, stub_columns) in enumerate(
+            column_groups
+        ):
             body = Box(
-                column_boundaries[column_start], row_boundaries[row_start],
-                column_boundaries[column_end], row_boundaries[row_end],
+                column_boundaries[column_start],
+                row_boundaries[row_start],
+                column_boundaries[column_end],
+                row_boundaries[row_end],
             )
             context_width = column_boundaries[stub_columns] - column_boundaries[0]
             context_height = row_boundaries[header_rows] - row_boundaries[0]
             plans.append(
                 TilePlan(
-                    region_index, row_index, column_index,
-                    len(row_groups), len(column_groups), body,
-                    body.width + context_width, body.height + context_height, 1.0,
+                    region_index,
+                    row_index,
+                    column_index,
+                    len(row_groups),
+                    len(column_groups),
+                    body,
+                    body.width + context_width,
+                    body.height + context_height,
+                    1.0,
                     f"region_{region_index:03d}_r{row_index:03d}_c{column_index:03d}.png",
                     logical_row_start=row_start,
                     logical_row_end=row_end,
