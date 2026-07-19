@@ -138,6 +138,9 @@ class PreparedRegion:
     grid_source: str = "unavailable"
     row_boundaries: list[int] = field(default_factory=list)
     column_boundaries: list[int] = field(default_factory=list)
+    # 表格物理网格上方、分析框顶部到第一根横线之间的候选标题区。
+    # 它只作为表前 Markdown 识别，不进入 R×C 网格。
+    top_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,5 +150,6 @@ class PreparedRegion:
             "grid_source": self.grid_source,
             "row_boundaries": self.row_boundaries,
             "column_boundaries": self.column_boundaries,
+            "top_context": self.top_context,
             "tiles": [tile.to_dict() for tile in self.tiles],
         }

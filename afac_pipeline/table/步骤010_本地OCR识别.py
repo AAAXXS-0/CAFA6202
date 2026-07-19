@@ -246,6 +246,28 @@ class LocalTableRecognizer:
             "mode": "plain-text-fallback",
         }
 
+    def _recognize_top_context(
+        self,
+        manifest_path: Path,
+        image_sha256: str,
+        region: dict[str, Any],
+    ) -> str:
+        """识别顶部候选区，并作为表格前普通文字输出。"""
+
+        context = region.get("top_context") or {}
+        if not context.get("has_text"):
+            return ""
+        path = manifest_path.parent / str(
+            context.get("recognition_file_name") or context["file_name"]
+        )
+        boxes = self.ocr.recognize_path(
+            path,
+            f"table-top-context/{image_sha256}/{region['index']}",
+        )
+        return "\n".join(
+            line.text for line in group_ocr_lines(boxes) if line.text.strip()
+        ).strip()
+
     def recognize_manifest(self, manifest_path: str | Path, image_sha256: str) -> str:
         manifest_path = Path(manifest_path)
         manifest = _load_json(manifest_path)
@@ -253,6 +275,11 @@ class LocalTableRecognizer:
         quality_dir = manifest_path.parent / "local_ocr_quality"
         quality_dir.mkdir(parents=True, exist_ok=True)
         for region in manifest["regions"]:
+            top_text = self._recognize_top_context(
+                manifest_path, image_sha256, region
+            )
+            if top_text:
+                output.append(top_text)
             tiles = region.get("tiles", [])
             logical = bool(
                 tiles

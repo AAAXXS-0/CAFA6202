@@ -50,7 +50,7 @@ from ..common.vlm_client import (
 )
 
 
-PROMPT_VERSION = "table-physical-grid-v5-quality-gate"
+PROMPT_VERSION = "table-physical-grid-v6-top-context-title"
 
 
 class TablePreprocessingError(RuntimeError):
@@ -120,6 +120,16 @@ def build_table_prompt(tile: TilePlan) -> str:
 6. 若边缘出现与相邻切片重复的行列，仍按图片如实输出，程序会根据重叠内容去重。
 
 直接输出 Markdown："""
+
+
+def build_top_context_prompt() -> str:
+    """顶部候选区只识别可见标题、单位和注释，不虚构表格。"""
+
+    return """你正在识别金融文档表格上方的一小块候选标题区域。
+
+只输出图片中真实可见的标题、单位、日期或注释文字，保持阅读顺序。
+如果图片中没有可读文字，输出空内容；严禁补全，不要生成表格，不要解释。
+直接输出 Markdown 文本："""
 
 
 def _logical_tile_shape(tile: TilePlan) -> tuple[int, int]:
@@ -443,6 +453,86 @@ class TablePipeline:
             )
         return grid
 
+    def _save_top_context(
+        self,
+        image_path: Path,
+        analysis_region: Box,
+        grid: GridStructure,
+        region_index: int,
+        image_dir: Path,
+    ) -> dict[str, Any] | None:
+        """保存分析框顶部到第一根横线的候选标题区。"""
+
+        if not self.config.top_context_enabled or not grid.row_boundaries:
+            return None
+        first_line = int(grid.row_boundaries[0])
+        # 黑线边界记录的是线芯中心，向上留保护像素，避免把半根横线
+        # 当成标题文字；白带模式通常从分析框外沿开始，这里自然为空。
+        y2 = min(
+            first_line - self.config.top_context_line_guard_px,
+            analysis_region.y2,
+        )
+        x1 = max(analysis_region.x1, int(grid.column_boundaries[0]))
+        x2 = min(analysis_region.x2, int(grid.column_boundaries[-1]))
+        box = Box(x1, analysis_region.y1, x2, y2)
+        if box.width <= 0 or box.height <= 0:
+            return None
+
+        relative = Path("top_context") / f"region_{region_index:03d}.png"
+        output_path = image_dir / relative
+        self.backend.save_crop(image_path, box, output_path)
+        with Image.open(output_path) as source:
+            image = source.convert("L").copy()
+        pixels = np.asarray(image)
+        ink_pixels = int(np.count_nonzero(pixels < self.config.grid_white_threshold))
+        pixel_count = max(1, image.width * image.height)
+        minimum_ink = max(
+            8,
+            round(pixel_count * self.config.top_context_min_ink_ratio),
+        )
+        has_text = ink_pixels >= minimum_ink
+        recognition_relative: Path | None = None
+        recognition_box: Box | None = None
+        if has_text:
+            ink_y, ink_x = np.nonzero(pixels < self.config.grid_white_threshold)
+            padding = max(
+                8,
+                round(min(image.width, image.height) * 0.15),
+            )
+            recognition_box = Box(
+                box.x1 + max(0, int(ink_x.min()) - padding),
+                box.y1 + max(0, int(ink_y.min()) - padding),
+                box.x1 + min(image.width, int(ink_x.max()) + 1 + padding),
+                box.y1 + min(image.height, int(ink_y.max()) + 1 + padding),
+            )
+            recognition_relative = (
+                Path("top_context") / f"region_{region_index:03d}_content.png"
+            )
+            self.backend.save_crop(
+                image_path,
+                recognition_box,
+                image_dir / recognition_relative,
+            )
+        return {
+            "file_name": relative.as_posix(),
+            "box": box.to_dict(),
+            "image_size": [image.width, image.height],
+            "ink_pixels": ink_pixels,
+            "ink_ratio": ink_pixels / pixel_count,
+            "minimum_ink_pixels": minimum_ink,
+            "has_text": has_text,
+            "recognition_file_name": (
+                recognition_relative.as_posix()
+                if recognition_relative is not None
+                else None
+            ),
+            "recognition_box": (
+                recognition_box.to_dict() if recognition_box is not None else None
+            ),
+            "source": "analysis-top-to-first-horizontal-line",
+            "line_guard_px": self.config.top_context_line_guard_px,
+        }
+
     def _save_tile(
         self,
         image_path: Path,
@@ -548,6 +638,22 @@ class TablePipeline:
                 outline=(0, 160, 0, 255),
                 width=3,
             )
+            if region.top_context:
+                top_box = self._preview_box(
+                    Box.from_dict(region.top_context["box"]),
+                    preview,
+                    meta,
+                )
+                draw.rectangle(
+                    (top_box.x1, top_box.y1, top_box.x2, top_box.y2),
+                    outline=(180, 0, 180, 255),
+                    width=3,
+                )
+                draw.text(
+                    (top_box.x1 + 3, top_box.y1 + 3),
+                    "TOP",
+                    fill=(180, 0, 180, 255),
+                )
             # 淡色细线表示结构检测得到的所有逻辑边界；红框表示真正送给
             # 大模型负责识别的主体范围。重复表头/行名列只出现在切块图片中。
             for boundary in region.row_boundaries[1:-1]:
@@ -690,6 +796,14 @@ class TablePipeline:
                     f"{image_path.name} 的表格区域 {region_index} 没有可信的 R×C 物理网格；"
                     f"禁止缩放或像素兜底。诊断：{error_path.resolve()}"
                 )
+            analysis_region_box = region_box
+            top_context = self._save_top_context(
+                image_path,
+                analysis_region_box,
+                grid,
+                region_index,
+                image_dir,
+            )
             region_box = Box(
                 grid.column_boundaries[0],
                 grid.row_boundaries[0],
@@ -772,12 +886,13 @@ class TablePipeline:
                     grid_source=grid.source,
                     row_boundaries=list(grid.row_boundaries),
                     column_boundaries=list(grid.column_boundaries),
+                    top_context=top_context,
                 )
             )
 
         audit = self._save_tile_audit(preview, meta, regions, tiles_dir, image_dir)
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
@@ -894,6 +1009,93 @@ class TablePipeline:
             result.append(values)
         return result
 
+    def _recognize_top_context(
+        self,
+        manifest_path: Path,
+        region: dict[str, Any],
+        image_name: str,
+        client: FinixDocClient,
+        cache_model: str,
+    ) -> str:
+        """识别表格顶部候选区；失败只记警告，不阻断主体表格。"""
+
+        context = region.get("top_context") or {}
+        if not context.get("has_text"):
+            return ""
+        title_path = manifest_path.parent / str(
+            context.get("recognition_file_name") or context["file_name"]
+        )
+        warning_path = (
+            manifest_path.parent
+            / "quality"
+            / f"top_context_region_{int(region['index']):03d}_warning.json"
+        )
+        prompt = select_request_prompt(
+            getattr(client, "protocol", CHAT_PROTOCOL),
+            build_top_context_prompt,
+        )
+        title_model = f"{cache_model};top-context-v1"
+        cache_key = self.cache.tile_key(
+            title_path.read_bytes(),
+            prompt,
+            title_model,
+        )
+        cached = self.cache.get_tile_entry(cache_key)
+        if cached is not None:
+            warning_path.unlink(missing_ok=True)
+            return cached[0].strip()
+
+        label = f"原图 {image_name} / 区域 {int(region['index']) + 1} / 顶部候选标题"
+        try:
+            if isinstance(client, FinixDocClient):
+                text = client.recognize(
+                    title_path,
+                    prompt,
+                    request_label=label,
+                    empty_retry_limit=min(3, client.max_retries),
+                    return_empty_after_limit=True,
+                )
+            else:
+                text = client.recognize(title_path, prompt)
+        except Exception as error:
+            _json_dump(
+                warning_path,
+                {
+                    "source_image": image_name,
+                    "region_index": region["index"],
+                    "error": str(error),
+                    "policy": "标题失败不阻断主体表格",
+                },
+            )
+            print(
+                f"[图表标题警告] {label}：{error}；继续主体表格。",
+                flush=True,
+            )
+            return ""
+
+        text = str(text or "").strip()
+        warning_path.unlink(missing_ok=True)
+        response_path = (
+            manifest_path.parent
+            / "responses"
+            / "top_context"
+            / f"region_{int(region['index']):03d}.md"
+        )
+        response_path.parent.mkdir(parents=True, exist_ok=True)
+        response_path.write_text(text, encoding="utf-8")
+        self.cache.put_tile(
+            cache_key,
+            text,
+            {
+                "source_image": image_name,
+                "region_index": region["index"],
+                "response_status": "empty" if not text else "valid",
+                "context": True,
+                "model": title_model,
+            },
+        )
+        return text
+
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)
         image_info = image_manifest["image"]
@@ -911,6 +1113,9 @@ class TablePipeline:
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
             plans = [self._tile_from_dict(raw) for raw in region["tiles"]]
+            top_context_markdown = self._recognize_top_context(
+                manifest_path, region, image_name, client, cache_model
+            )
             row_boundaries = [int(value) for value in region.get("row_boundaries", [])]
             column_boundaries = [
                 int(value) for value in region.get("column_boundaries", [])
@@ -1331,7 +1536,10 @@ class TablePipeline:
                     flush=True,
                 )
                 continue
-            region_markdowns.append(region_markdown.strip())
+            region_text = region_markdown.strip()
+            if top_context_markdown:
+                region_text = f"{top_context_markdown.strip()}\n\n{region_text}"
+            region_markdowns.append(region_text)
         part_failure_path = manifest_path.parent / "recognition_failures.json"
         _json_dump(
             part_failure_path,
@@ -1385,17 +1593,30 @@ class TablePipeline:
             canonical_name = item["canonical_file_name"]
             cached = self.cache.get_image(item["sha256"], recognition_digest)
             if cached is None:
-                cached = self._recognize_manifest(Path(item["image_manifest"]), client)
-                self.cache.put_image(
-                    item["sha256"],
-                    recognition_digest,
-                    cached,
-                    {
-                        "canonical_file_name": canonical_name,
-                        "model": cache_model,
-                        "prompt_version": PROMPT_VERSION,
-                    },
+                image_manifest_path = Path(item["image_manifest"])
+                cached = self._recognize_manifest(image_manifest_path, client)
+                title_warnings = list(
+                    (image_manifest_path.parent / "quality").glob(
+                        "top_context_region_*_warning.json"
+                    )
                 )
+                if not title_warnings:
+                    self.cache.put_image(
+                        item["sha256"],
+                        recognition_digest,
+                        cached,
+                        {
+                            "canonical_file_name": canonical_name,
+                            "model": cache_model,
+                            "prompt_version": PROMPT_VERSION,
+                        },
+                    )
+                else:
+                    print(
+                        f"[图表整图暂不缓存] 原图 {canonical_name}："
+                        "顶部候选标题识别失败，主体结果仍正常输出；下次只重试标题。",
+                        flush=True,
+                    )
             return canonical_name, cached
 
         def recognize_safely(

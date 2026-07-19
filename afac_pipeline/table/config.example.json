@@ -21,6 +21,9 @@
   "ink_minimum_box_area_ratio": 0.01,
   "grid_analysis_max_side": 4096,
   "grid_white_threshold": 225,
+  "top_context_enabled": true,
+  "top_context_line_guard_px": 4,
+  "top_context_min_ink_ratio": 0.00002,
   "grid_line_min_ratio": 0.90,
   "grid_min_line_count": 5,
   "grid_black_line_ratio": 0.90,
@@ -46,5 +49,5 @@
   "projection_min_line_ratio": 0.22,
   "projection_min_lines": 3,
   "projection_max_line_gap_ratio": 0.10,
-  "pipeline_version": "table-v15-98-percent-bypasses-column-contrast"
+  "pipeline_version": "table-v17-top-context-content-crop"
 }

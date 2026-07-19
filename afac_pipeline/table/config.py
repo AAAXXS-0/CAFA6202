@@ -47,6 +47,11 @@ class TableConfig:
     ink_minimum_box_area_ratio: float = 0.01
     grid_analysis_max_side: int = 4096
     grid_white_threshold: int = 225
+    # 分析框顶部到第一根横线之间单独保存为候选标题区。它不参与
+    # 物理网格，只在最终表格 Markdown 前输出一次。
+    top_context_enabled: bool = True
+    top_context_line_guard_px: int = 4
+    top_context_min_ink_ratio: float = 0.00002
     grid_line_min_ratio: float = 0.90
     grid_min_line_count: int = 5
     grid_black_line_ratio: float = 0.90
@@ -83,7 +88,7 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v15-98-percent-bypasses-column-contrast"
+    pipeline_version: str = "table-v17-top-context-content-crop"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -122,6 +127,10 @@ class TableConfig:
             raise ValueError("grid_analysis_max_side 应位于 512 到 4096 之间")
         if not 0 <= self.grid_white_threshold <= 255:
             raise ValueError("grid_white_threshold 必须位于 0 到 255 之间")
+        if self.top_context_line_guard_px < 0:
+            raise ValueError("顶部候选区的横线保护像素不能为负数")
+        if not 0 <= self.top_context_min_ink_ratio < 1:
+            raise ValueError("顶部候选区最小墨迹比例必须位于 [0, 1) 内")
         if not 0 < self.grid_line_min_ratio <= 1:
             raise ValueError("grid_line_min_ratio 必须位于 (0, 1] 内")
         if self.grid_min_line_count < 2 or self.grid_min_cell_size <= 0:
