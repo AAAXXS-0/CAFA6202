@@ -16,6 +16,10 @@ from tempfile import TemporaryDirectory
 
 from ..common.cache import ResultCache
 from ..common.recognition_errors import IncompleteImageRecognitionError
+from ..common.preprocessing_audit import (
+    建立中文中间产物,
+    写入预处理检查点,
+)
 from .config import TableConfig
 from .步骤003_区域检测器入口 import (
     InkTableDetector,
@@ -322,14 +326,14 @@ class TablePipeline:
     def _analyze_grid(
         self, image_path: Path, region: Box, region_index: int, image_dir: Path
     ) -> GridStructure:
-        """用 20% 图找白带、50% 图找黑线，再把边界映射回原图。"""
+        """每张子表只生成一张50%分析图，在同一坐标系检测黑线和白缝。"""
 
         analysis_dir = image_dir / "grid_analysis"
         analysis_path = analysis_dir / f"region_{region_index:03d}.png"
         black_analysis = None
-        black_analysis_path = analysis_dir / f"region_{region_index:03d}_black_50.png"
+        black_analysis_path = analysis_path
         if isinstance(self.detector, InkTableDetector):
-            scale = self.config.table_analysis_scale
+            scale = self.config.table_black_line_scale
         else:
             scale = min(
                 1.0,
@@ -340,23 +344,14 @@ class TablePipeline:
             analysis = source.convert("RGB").copy()
         diagnostics = None
         if isinstance(self.detector, InkTableDetector):
-            black_longest = round(
-                max(region.width, region.height) * self.config.table_black_line_scale
-            )
-            if black_longest > self.config.table_black_analysis_max_side:
+            analysis_longest = round(max(region.width, region.height) * scale)
+            if analysis_longest > self.config.table_black_analysis_max_side:
                 raise TablePreprocessingError(
-                    f"{image_path.name} 的表格区域 {region_index} 在 50% 黑线分析时"
-                    f"最长边为 {black_longest}，超过安全上限 "
+                    f"{image_path.name} 的表格区域 {region_index} 在50%统一分析时"
+                    f"最长边为 {analysis_longest}，超过安全上限 "
                     f"{self.config.table_black_analysis_max_side}"
                 )
-            self.backend.save_crop(
-                image_path,
-                region,
-                black_analysis_path,
-                scale=self.config.table_black_line_scale,
-            )
-            with Image.open(black_analysis_path) as source:
-                black_analysis = source.convert("RGB").copy()
+            black_analysis = analysis
             grid, diagnostics = detect_v6_grid(
                 analysis,
                 region,
@@ -428,35 +423,7 @@ class TablePipeline:
                     / f"region_{region_index:03d}_body_windows.png"
                 )
 
-            # 同时保存旧 20% 黑线候选，确保这一轮可以直接做逐像素对照。
-            old_black_overlay = analysis.copy()
-            old_black_draw = ImageDraw.Draw(old_black_overlay)
-            for line in diagnostics.black_rows_at_whitespace_scale:
-                old_black_draw.line(
-                    (line.start, line.position, line.end, line.position),
-                    fill=(255, 0, 0),
-                    width=2,
-                )
-            for line in diagnostics.black_columns_at_whitespace_scale:
-                old_black_draw.line(
-                    (line.position, line.start, line.position, line.end),
-                    fill=(0, 80, 255),
-                    width=2,
-                )
-            for boundary in grid.row_boundaries[1:-1]:
-                y = round((boundary - region.y1) * analysis.height / region.height)
-                old_black_draw.line(
-                    (0, y, analysis.width, y), fill=(0, 180, 0), width=2
-                )
-            for boundary in grid.column_boundaries[1:-1]:
-                x = round((boundary - region.x1) * analysis.width / region.width)
-                old_black_draw.line(
-                    (x, 0, x, analysis.height), fill=(0, 180, 0), width=2
-                )
-            old_black_overlay.save(
-                analysis_dir / f"region_{region_index:03d}_black_20_candidates.png"
-            )
-            # 50% 图单独画出所有黑线候选，再叠加最终采用的物理边界。
+            # 在统一50%分析图上画出黑线候选及最终采用边界。
             black_overlay = black_analysis.copy()
             black_draw = ImageDraw.Draw(black_overlay)
             for line in diagnostics.black_rows:
@@ -491,7 +458,7 @@ class TablePipeline:
                     (x, 0, x, black_analysis.height), fill=(0, 180, 0), width=2
                 )
             black_overlay.save(
-                analysis_dir / f"region_{region_index:03d}_black_50_candidates.png"
+                analysis_dir / f"region_{region_index:03d}_black_candidates.png"
             )
             cleanup_overlay = black_analysis.copy()
             cleanup_draw = ImageDraw.Draw(cleanup_overlay)
@@ -509,11 +476,9 @@ class TablePipeline:
                     width=4,
                 )
             cleanup_overlay.save(
-                analysis_dir / f"region_{region_index:03d}_black_50_cleanup.png"
+                analysis_dir / f"region_{region_index:03d}_black_cleanup.png"
             )
-            # 列白带通常画在20%图上；只有常规图无法形成可信列网格时，
-            # 诊断对象才来自50%图。可视化必须跟随真实坐标系，否则线会
-            # 被画到错误位置，反而妨碍人工判断。
+            # 黑线和白缝现在都来自同一张50%分析图；清理图沿用同一坐标系。
             white_cleanup_base = (
                 black_analysis if diagnostics.white_column_uses_black_scale else analysis
             )
@@ -865,16 +830,103 @@ class TablePipeline:
             "tile_contact_sheet": str(contact_path.resolve()),
         }
 
-    def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
-        # 配置摘要进入目录名，切换检测/切片参数后不会与旧 tiles 混在一起。
-        image_dir = (
+    def _single_image_directory(
+        self,
+        image_path: Path,
+        image_sha256: str,
+    ) -> Path:
+        """配置摘要进入目录名，参数变化时不会误复用旧产物。"""
+
+        return (
             self.work_dir
             / "prepared"
-            / (f"{image_path.stem}_{image_sha256[:12]}_{self.config.digest()[:8]}")
+            / (
+                f"{image_path.stem}_{image_sha256[:12]}_"
+                f"{self.config.digest()[:8]}"
+            )
         )
+
+    def _find_reusable_manifest(
+        self,
+        manifest_path: Path,
+        image_sha256: str,
+    ) -> Path | None:
+        """确认 R×C、墨迹矩阵和所有 API 切块完整后才复用单图缓存。"""
+
+        if not manifest_path.is_file():
+            return None
+        try:
+            manifest = _load_json(manifest_path)
+            if manifest.get("schema_version") != 4:
+                return None
+            if manifest.get("config") != self.config.to_dict():
+                return None
+            if manifest.get("image", {}).get("sha256") != image_sha256:
+                return None
+            regions = manifest.get("regions")
+            if not isinstance(regions, list) or not regions:
+                return None
+            for region in regions:
+                rows = region.get("row_boundaries")
+                columns = region.get("column_boundaries")
+                mask = region.get("cell_ink_mask")
+                tiles = region.get("tiles")
+                if (
+                    not isinstance(rows, list)
+                    or len(rows) < 2
+                    or not isinstance(columns, list)
+                    or len(columns) < 2
+                    or not isinstance(mask, list)
+                    or len(mask) != len(rows) - 1
+                    or any(
+                        not isinstance(row, list)
+                        or len(row) != len(columns) - 1
+                        for row in mask
+                    )
+                    or not isinstance(tiles, list)
+                    or not tiles
+                ):
+                    return None
+                for tile in tiles:
+                    file_name = tile.get("file_name")
+                    if (
+                        not file_name
+                        or not (
+                            manifest_path.parent / "tiles" / file_name
+                        ).is_file()
+                    ):
+                        return None
+                context = region.get("top_context") or {}
+                context_name = (
+                    context.get("recognition_file_name")
+                    or context.get("file_name")
+                )
+                if context.get("has_text") and (
+                    not context_name
+                    or not (manifest_path.parent / context_name).is_file()
+                ):
+                    return None
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+        return manifest_path
+
+    def _prepare_one(self, image_path: Path, image_sha256: str) -> Path:
+        image_dir = self._single_image_directory(image_path, image_sha256)
+        manifest_path = image_dir / "manifest.json"
+        reusable = self._find_reusable_manifest(manifest_path, image_sha256)
+        if reusable is not None:
+            print(
+                f"[图表准备复用] {image_path.name}：R×C、墨迹矩阵和切块均完整",
+                flush=True,
+            )
+            return reusable
+
         tiles_dir = image_dir / "tiles"
         image_dir.mkdir(parents=True, exist_ok=True)
         tiles_dir.mkdir(parents=True, exist_ok=True)
+        stale_error = image_dir / "预处理致命错误.json"
+        if stale_error.exists():
+            stale_error.unlink()
 
         meta = self.backend.read_meta(image_path, known_sha256=image_sha256)
         preview = self._make_detection_preview(image_path, meta, image_dir)
@@ -900,6 +952,10 @@ class TablePipeline:
         self._draw_preview_boxes(preview, detected, meta).save(
             image_dir / "preview_detected.png", format="PNG", optimize=True
         )
+
+        # R×C确定后立即逐格判断墨迹；准备阶段只读取一次原图灰度。
+        with Image.open(image_path) as source:
+            source_gray = np.asarray(source.convert("L"), dtype=np.uint8)
 
         regions: list[PreparedRegion] = []
         for region_index, item in enumerate(detected):
@@ -949,6 +1005,29 @@ class TablePipeline:
                 grid.row_boundaries[0],
                 grid.column_boundaries[-1],
                 grid.row_boundaries[-1],
+            )
+            cell_ink_mask = self._physical_cell_ink_mask(
+                source_gray,
+                list(grid.row_boundaries),
+                list(grid.column_boundaries),
+            )
+            cell_ink_mask_path = (
+                image_dir
+                / "grid_analysis"
+                / f"region_{region_index:03d}_cell_ink_mask.json"
+            )
+            _json_dump(
+                cell_ink_mask_path,
+                {
+                    "physical_shape": [grid.row_count, grid.column_count],
+                    "ink_cell_count": sum(
+                        int(value)
+                        for row in cell_ink_mask
+                        for value in row
+                    ),
+                    "cell_ink_mask": cell_ink_mask,
+                    "meaning": "true表示该R×C物理格内部存在墨迹",
+                },
             )
             plans = plan_grid_tiles(
                 region_box,
@@ -1030,13 +1109,14 @@ class TablePipeline:
                     rejected_column_boundaries=list(
                         grid.rejected_column_boundaries
                     ),
+                    cell_ink_mask=cell_ink_mask,
                     top_context=top_context,
                 )
             )
 
         audit = self._save_tile_audit(preview, meta, regions, tiles_dir, image_dir)
         manifest = {
-            "schema_version": 3,
+            "schema_version": 4,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "image": meta.to_dict(),
             "backend": self.backend.name,
@@ -1045,53 +1125,146 @@ class TablePipeline:
             "regions": [region.to_dict() for region in regions],
             "audit": audit,
         }
-        manifest_path = image_dir / "manifest.json"
         _json_dump(manifest_path, manifest)
         return manifest_path
 
-    def prepare_directory(self, input_dir: str | Path) -> Path:
-        """切分图表目录并生成可审计的数据集清单。"""
+    def prepare_directory(
+        self,
+        input_dir: str | Path,
+        *,
+        continue_on_error: bool = False,
+    ) -> Path:
+        """逐图断点准备；成功图复用，fatal 图重试并持续写中文汇总。"""
 
         paths = discover_images(input_dir)
         if not paths:
             raise RuntimeError(f"图表目录中没有图片：{input_dir}")
         groups = group_exact_duplicates(paths)
         items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
         sorted_groups = sorted(groups.items(), key=lambda pair: pair[1][0].name)
-        for group_index, (image_sha256, group) in enumerate(sorted_groups, start=1):
+
+        def checkpoint(processed: int, *, complete: bool) -> Path:
+            return 写入预处理检查点(
+                work_dir=self.work_dir,
+                branch="图表",
+                input_dir=input_dir,
+                config=self.config.to_dict(),
+                config_digest=self.config.digest(),
+                image_count=len(paths),
+                unique_image_count=len(groups),
+                duplicate_reuse_count=len(paths) - len(groups),
+                processed_unique_count=processed,
+                items=items,
+                failures=failures,
+                complete=complete,
+            )
+
+        checkpoint(0, complete=False)
+        for group_index, (image_sha256, group) in enumerate(
+            sorted_groups, start=1
+        ):
             canonical = sorted(group, key=lambda path: path.name)[0]
+            image_dir = self._single_image_directory(canonical, image_sha256)
+            candidate_manifest = image_dir / "manifest.json"
+            was_reused = (
+                self._find_reusable_manifest(
+                    candidate_manifest,
+                    image_sha256,
+                )
+                is not None
+            )
             print(
-                f"[准备 {group_index:02d}/{len(sorted_groups):02d}] "
+                f"[图表准备 {group_index:02d}/{len(sorted_groups):02d}] "
                 f"{canonical.name}（同内容文件 {len(group)} 张）",
                 flush=True,
             )
-            manifest_path = self._prepare_one(canonical, image_sha256)
-            for path in sorted(group, key=lambda item: item.name):
+            try:
+                manifest_path = self._prepare_one(canonical, image_sha256)
+                chinese_artifacts = 建立中文中间产物(
+                    manifest_path.parent,
+                    "图表",
+                    original_image=canonical,
+                )
+            except Exception as error:
+                error_path = image_dir / "预处理致命错误.json"
+                if not error_path.is_file():
+                    _json_dump(
+                        error_path,
+                        {
+                            "image_name": canonical.name,
+                            "stage": "未知预处理阶段",
+                            "reason": str(error),
+                            "error_type": type(error).__name__,
+                            "diagnostic_directory": str(image_dir.resolve()),
+                        },
+                    )
+                chinese_artifacts = 建立中文中间产物(
+                    image_dir,
+                    "图表",
+                    original_image=canonical,
+                )
+                failure = {
+                    "canonical_file_name": canonical.name,
+                    "file_names": [
+                        path.name
+                        for path in sorted(group, key=lambda item: item.name)
+                    ],
+                    "paths": [
+                        str(path.resolve())
+                        for path in sorted(group, key=lambda item: item.name)
+                    ],
+                    "sha256": image_sha256,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "chinese_artifacts": str(chinese_artifacts.resolve()),
+                }
+                failures.append(failure)
+                checkpoint(group_index, complete=False)
+                print(
+                    f"[图表预处理fatal] {canonical.name}：{error}\n"
+                    f"  中文中间产物：{chinese_artifacts.resolve()}\n"
+                    f"  错误已写入汇总，继续下一张。",
+                    flush=True,
+                )
+                if not continue_on_error:
+                    raise
+                continue
+
+            for member in sorted(group, key=lambda item: item.name):
                 items.append(
                     {
-                        "file_name": path.name,
-                        "path": str(path.resolve()),
+                        "file_name": member.name,
+                        "path": str(member.resolve()),
                         "sha256": image_sha256,
                         "canonical_file_name": canonical.name,
-                        "duplicate_of": None if path == canonical else canonical.name,
+                        "duplicate_of": (
+                            None if member == canonical else canonical.name
+                        ),
                         "image_manifest": str(manifest_path.resolve()),
+                        "preprocessing_cache": (
+                            "reused" if was_reused else "new"
+                        ),
+                        "chinese_artifacts": str(
+                            chinese_artifacts.resolve()
+                        ),
                     }
                 )
+            checkpoint(group_index, complete=False)
 
-        dataset_manifest = {
-            "schema_version": 1,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "input_dir": str(Path(input_dir).resolve()),
-            "config": self.config.to_dict(),
-            "config_digest": self.config.digest(),
-            "image_count": len(paths),
-            "unique_image_count": len(groups),
-            "duplicate_reuse_count": len(paths) - len(groups),
-            "items": sorted(items, key=lambda item: item["file_name"]),
-        }
-        output_path = self.work_dir / "dataset_manifest.json"
-        _json_dump(output_path, dataset_manifest)
-        return output_path
+        output = checkpoint(len(sorted_groups), complete=True)
+        reused = sum(
+            1 for item in items if item["preprocessing_cache"] == "reused"
+        )
+        print(
+            f"[图表预处理汇总] 成功 {len(items)}/{len(paths)}，"
+            f"fatal {sum(len(item['file_names']) for item in failures)}，"
+            f"逐图缓存复用 {reused}。\n"
+            f"  HTML：{(self.work_dir / '预处理进度与错误汇总.html').resolve()}\n"
+            f"  CSV：{(self.work_dir / '预处理进度与错误汇总.csv').resolve()}",
+            flush=True,
+        )
+        return output
 
     @staticmethod
     def _tile_from_dict(raw: dict[str, Any]) -> TilePlan:
@@ -1115,6 +1288,61 @@ class TablePipeline:
             tiling_mode=str(raw.get("tiling_mode", "pixel_overlap")),
         )
 
+    def _physical_cell_ink_mask(
+        self,
+        gray: np.ndarray,
+        row_boundaries: list[int],
+        column_boundaries: list[int],
+    ) -> list[list[bool]]:
+        """R×C形成后，逐个物理格判断其内部是否存在真实墨迹。"""
+
+        result: list[list[bool]] = []
+        for row, (y1, y2) in enumerate(
+            zip(row_boundaries, row_boundaries[1:])
+        ):
+            values: list[bool] = []
+            for column, (x1, x2) in enumerate(
+                zip(column_boundaries, column_boundaries[1:])
+            ):
+                # 向内缩约10%，避免把四周物理表格线记成单元格内容。
+                inset_x = min(
+                    max(1, (x2 - x1) // 10),
+                    max(1, (x2 - x1 - 1) // 3),
+                )
+                inset_y = min(
+                    max(1, (y2 - y1) // 10),
+                    max(1, (y2 - y1 - 1) // 3),
+                )
+                inner = gray[
+                    y1 + inset_y : max(y1 + inset_y + 1, y2 - inset_y),
+                    x1 + inset_x : max(x1 + inset_x + 1, x2 - inset_x),
+                ]
+                ink_pixels = int(
+                    np.count_nonzero(inner < self.config.grid_white_threshold)
+                )
+                values.append(ink_pixels > max(2, round(inner.size * 0.003)))
+            result.append(values)
+        return result
+
+    @staticmethod
+    def _slice_cell_ink_mask(
+        cell_ink_mask: list[list[bool]],
+        tile: TilePlan,
+    ) -> list[list[bool]]:
+        """从整张R×C墨迹矩阵中切出当前逻辑切片负责的子矩阵。"""
+
+        row_indices = [
+            *range(tile.header_context_rows),
+            *range(tile.logical_row_start, tile.logical_row_end),
+        ]
+        column_indices = [
+            *range(tile.stub_context_columns),
+            *range(tile.logical_column_start, tile.logical_column_end),
+        ]
+        return [
+            [bool(cell_ink_mask[row][column]) for column in column_indices]
+            for row in row_indices
+        ]
     def _tile_ink_mask(
         self,
         gray: np.ndarray,
@@ -1249,11 +1477,17 @@ class TablePipeline:
         cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
         completed_tiles = 0
-        with Image.open(image_manifest["image"]["path"]) as source:
-            source_gray = np.asarray(
-                source.convert("L"),
-                dtype=np.uint8,
-            )
+        source_gray = None
+        if any(
+            not region.get("cell_ink_mask")
+            for region in image_manifest["regions"]
+        ):
+            # 仅兼容旧manifest；新版预处理已把整张R×C墨迹矩阵写入清单。
+            with Image.open(image_manifest["image"]["path"]) as source:
+                source_gray = np.asarray(
+                    source.convert("L"),
+                    dtype=np.uint8,
+                )
         for region in image_manifest["regions"]:
             contents: dict[tuple[int, int], str] = {}
             plans = [self._tile_from_dict(raw) for raw in region["tiles"]]
@@ -1264,16 +1498,31 @@ class TablePipeline:
             column_boundaries = [
                 int(value) for value in region.get("column_boundaries", [])
             ]
-            tile_ink_masks = (
-                {
-                    (plan.row_index, plan.column_index): self._tile_ink_mask(
-                        source_gray, row_boundaries, column_boundaries, plan
+            region_cell_ink_mask = region.get("cell_ink_mask") or []
+            if region_cell_ink_mask:
+                tile_ink_masks = {
+                    (plan.row_index, plan.column_index): self._slice_cell_ink_mask(
+                        region_cell_ink_mask,
+                        plan,
                     )
                     for plan in plans
                 }
-                if row_boundaries and column_boundaries
-                else {}
-            )
+            elif (
+                source_gray is not None
+                and row_boundaries
+                and column_boundaries
+            ):
+                tile_ink_masks = {
+                    (plan.row_index, plan.column_index): self._tile_ink_mask(
+                        source_gray,
+                        row_boundaries,
+                        column_boundaries,
+                        plan,
+                    )
+                    for plan in plans
+                }
+            else:
+                tile_ink_masks = {}
             response_dir = manifest_path.parent / "responses"
             response_dir.mkdir(parents=True, exist_ok=True)
             for raw_tile in region["tiles"]:

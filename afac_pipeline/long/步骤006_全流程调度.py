@@ -15,6 +15,10 @@ from ..common.cache import ResultCache
 from ..common.hashing import discover_images, group_exact_duplicates
 from ..common.image_backend import ImageBackend, create_backend
 from ..common.recognition_errors import IncompleteImageRecognitionError
+from ..common.preprocessing_audit import (
+    建立中文中间产物,
+    写入预处理检查点,
+)
 from .config import LongConfig
 from .步骤003_滑窗与YOLO检测 import (
     GeneralYoloDetector,
@@ -153,6 +157,9 @@ class LongPipeline:
         request_dir = image_dir / "vlm_requests"
         audit_dir = image_dir / "semantic_audit"
         image_dir.mkdir(parents=True, exist_ok=True)
+        stale_error = image_dir / "预处理致命错误.json"
+        if stale_error.exists():
+            stale_error.unlink()
 
         meta = self.backend.read_meta(image_path, known_sha256=image_sha256)
         windows = plan_detection_windows(meta.height, self.config)
@@ -257,47 +264,146 @@ class LongPipeline:
         _dump_json(manifest_path, manifest)
         return manifest_path
 
-    def prepare_directory(self, input_dir: str | Path) -> Path:
+    def prepare_directory(
+        self,
+        input_dir: str | Path,
+        *,
+        continue_on_error: bool = False,
+    ) -> Path:
+        """逐图断点准备；成功图复用，fatal 图重试并持续写中文汇总。"""
+
         paths = discover_images(input_dir)
         if not paths:
             raise RuntimeError(f"长图目录中没有图片：{input_dir}")
         groups = group_exact_duplicates(paths)
         items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
         sorted_groups = sorted(groups.items(), key=lambda pair: pair[1][0].name)
-        for index, (image_sha256, group) in enumerate(sorted_groups, start=1):
+
+        def checkpoint(processed: int, *, complete: bool) -> Path:
+            return 写入预处理检查点(
+                work_dir=self.work_dir,
+                branch="长图",
+                input_dir=input_dir,
+                config=self.config.to_dict(),
+                config_digest=self.config.digest(),
+                image_count=len(paths),
+                unique_image_count=len(groups),
+                duplicate_reuse_count=len(paths) - len(groups),
+                processed_unique_count=processed,
+                items=items,
+                failures=failures,
+                complete=complete,
+            )
+
+        checkpoint(0, complete=False)
+        for group_index, (image_sha256, group) in enumerate(
+            sorted_groups, start=1
+        ):
             canonical = sorted(group, key=lambda path: path.name)[0]
+            image_dir = (
+                self.work_dir
+                / "prepared"
+                / f"{canonical.stem}_{image_sha256[:12]}"
+            )
+            candidate_manifest = image_dir / "manifest.json"
+            was_reused = (
+                self._find_reusable_manifest(
+                    candidate_manifest,
+                    image_sha256,
+                )
+                is not None
+            )
             print(
-                f"[长图准备 {index:02d}/{len(sorted_groups):02d}] "
+                f"[长图准备 {group_index:02d}/{len(sorted_groups):02d}] "
                 f"{canonical.name}（同内容文件 {len(group)} 张）",
                 flush=True,
             )
-            manifest_path = self._prepare_one(canonical, image_sha256)
-            for path in sorted(group, key=lambda item: item.name):
+            try:
+                manifest_path = self._prepare_one(canonical, image_sha256)
+                chinese_artifacts = 建立中文中间产物(
+                    manifest_path.parent,
+                    "长图",
+                    original_image=canonical,
+                )
+            except Exception as error:
+                error_path = image_dir / "预处理致命错误.json"
+                _dump_json(
+                    error_path,
+                    {
+                        "image_name": canonical.name,
+                        "stage": "长图预处理",
+                        "reason": str(error),
+                        "error_type": type(error).__name__,
+                        "diagnostic_directory": str(image_dir.resolve()),
+                    },
+                )
+                chinese_artifacts = 建立中文中间产物(
+                    image_dir,
+                    "长图",
+                    original_image=canonical,
+                )
+                failure = {
+                    "canonical_file_name": canonical.name,
+                    "file_names": [
+                        member.name
+                        for member in sorted(group, key=lambda item: item.name)
+                    ],
+                    "paths": [
+                        str(member.resolve())
+                        for member in sorted(group, key=lambda item: item.name)
+                    ],
+                    "sha256": image_sha256,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "chinese_artifacts": str(chinese_artifacts.resolve()),
+                }
+                failures.append(failure)
+                checkpoint(group_index, complete=False)
+                print(
+                    f"[长图预处理fatal] {canonical.name}：{error}\n"
+                    f"  中文中间产物：{chinese_artifacts.resolve()}\n"
+                    f"  错误已写入汇总，继续下一张。",
+                    flush=True,
+                )
+                if not continue_on_error:
+                    raise
+                continue
+
+            for member in sorted(group, key=lambda item: item.name):
                 items.append(
                     {
-                        "file_name": path.name,
-                        "path": str(path.resolve()),
+                        "file_name": member.name,
+                        "path": str(member.resolve()),
                         "sha256": image_sha256,
                         "canonical_file_name": canonical.name,
-                        "duplicate_of": None if path == canonical else canonical.name,
+                        "duplicate_of": (
+                            None if member == canonical else canonical.name
+                        ),
                         "image_manifest": str(manifest_path.resolve()),
+                        "preprocessing_cache": (
+                            "reused" if was_reused else "new"
+                        ),
+                        "chinese_artifacts": str(
+                            chinese_artifacts.resolve()
+                        ),
                     }
                 )
+            checkpoint(group_index, complete=False)
 
-        dataset_manifest = {
-            "schema_version": 1,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "input_dir": str(Path(input_dir).resolve()),
-            "config": self.config.to_dict(),
-            "config_digest": self.config.digest(),
-            "image_count": len(paths),
-            "unique_image_count": len(groups),
-            "duplicate_reuse_count": len(paths) - len(groups),
-            "items": sorted(items, key=lambda item: item["file_name"]),
-        }
-        output_path = self.work_dir / "dataset_manifest.json"
-        _dump_json(output_path, dataset_manifest)
-        return output_path
+        output = checkpoint(len(sorted_groups), complete=True)
+        reused = sum(
+            1 for item in items if item["preprocessing_cache"] == "reused"
+        )
+        print(
+            f"[长图预处理汇总] 成功 {len(items)}/{len(paths)}，"
+            f"fatal {sum(len(item['file_names']) for item in failures)}，"
+            f"逐图缓存复用 {reused}。\n"
+            f"  HTML：{(self.work_dir / '预处理进度与错误汇总.html').resolve()}\n"
+            f"  CSV：{(self.work_dir / '预处理进度与错误汇总.csv').resolve()}",
+            flush=True,
+        )
+        return output
 
     def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
         image_manifest = _load_json(manifest_path)

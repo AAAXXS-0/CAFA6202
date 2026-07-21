@@ -63,6 +63,8 @@
   "body_column_position_tolerance_px": 8,
   "body_column_dilate_min_ratio": 0.01,
   "body_column_dilate_max_ratio": 0.03,
+  "body_row_dilate_min_ratio": 0.015,
+  "body_row_dilate_max_ratio": 0.04,
   "repeat_header_rows": 0,
   "repeat_stub_columns": 0,
   "max_logical_cells_per_tile": 140,
@@ -74,5 +76,5 @@
   "projection_max_line_gap_ratio": 0.10,
   "density_title_strip_max_page_height_ratio": 0.05,
   "density_title_strip_max_next_height_ratio": 0.10,
-  "pipeline_version": "table-v23-density-sliding-body-columns-r1"
+  "pipeline_version": "table-v24-unified50-adaptive-white-grid-r1"
 }

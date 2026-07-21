@@ -23,11 +23,10 @@ class TableConfig:
     yolo_confidence: float = 0.25
     yolo_imgsz: int = 1280
     preview_max_side: int = 1800
-    # 正式流程固定使用原图20%做横向分表和常规白带分析。分表只允许
-    # 上下切，不再产生左右分表；5%密度图仅保留为审计中间产物。
+    # 正式流程固定使用整图20%预览做横向分表。分表只允许上下切；
+    # 每张子表的黑线与白缝划线另行统一使用50%分析图。
     table_analysis_scale: float = 0.20
-    # 白带仍使用上面的 20% 分析图；只有容易被缩灰、缩断的黑表格线
-    # 单独回到分表后的原图区域，以 50% 分辨率检测。
+    # 分表后的每张子表只生成这一张50%分析图，黑线和白缝共用。
     table_black_line_scale: float = 0.50
     table_black_analysis_max_side: int = 12000
     table_density_scale: float = 0.25
@@ -110,6 +109,8 @@ class TableConfig:
     body_column_position_tolerance_px: int = 8
     body_column_dilate_min_ratio: float = 0.01
     body_column_dilate_max_ratio: float = 0.03
+    body_row_dilate_min_ratio: float = 0.015
+    body_row_dilate_max_ratio: float = 0.04
     repeat_header_rows: int = 0
     repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
@@ -129,7 +130,7 @@ class TableConfig:
     # 小区域会并回下一张表，由 top_context 链路识别标题。
     density_title_strip_max_page_height_ratio: float = 0.05
     density_title_strip_max_next_height_ratio: float = 0.10
-    pipeline_version: str = "table-v23-density-sliding-body-columns-r1"
+    pipeline_version: str = "table-v24-unified50-adaptive-white-grid-r1"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -258,6 +259,8 @@ class TableConfig:
             raise ValueError("窗口列位置容差不能为负数")
         if not 0 < self.body_column_dilate_min_ratio <= self.body_column_dilate_max_ratio:
             raise ValueError("表体列晕染比例范围不合法")
+        if not 0 < self.body_row_dilate_min_ratio <= self.body_row_dilate_max_ratio:
+            raise ValueError("行白缝左右晕染比例范围不合法")
         if self.repeat_header_rows < 0 or self.repeat_stub_columns < 0:
             raise ValueError("重复表头行数和行名列数不能为负数")
         if self.max_logical_cells_per_tile < 32:

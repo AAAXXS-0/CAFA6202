@@ -130,6 +130,7 @@ class V6GridDiagnostics:
     white_column_regularity_after: float = 0.0
     white_column_cleanup: str = ""
     white_column_uses_black_scale: bool = False
+    white_row_dilate_ratio: float = 0.0
     # 表体滑动窗口诊断；窗口为空时仍保留旧白带兜底结果。
     body_window_selected: tuple[int, int] | None = None
     body_window_box: tuple[int, int, int, int] | None = None
@@ -181,8 +182,9 @@ class V6GridDiagnostics:
             "white_column_regularity_before": self.white_column_regularity_before,
             "white_column_regularity_after": self.white_column_regularity_after,
             "white_column_cleanup": self.white_column_cleanup,
+            "white_row_dilate_ratio": self.white_row_dilate_ratio,
             "white_column_analysis": (
-                "50%条件兜底图" if self.white_column_uses_black_scale else "20%常规图"
+                "50%滑窗表体图" if self.white_column_uses_black_scale else "50%统一分析图"
             ),
             "body_window_selected": (
                 None
@@ -761,6 +763,31 @@ def _erase_confirmed_grid_lines(ink, rows, columns):
         result[max(0,line.start):min(ink.shape[0],line.end),x1:x2]=False
     return result
 
+def _adaptive_white_rows(ink, config):
+    """按当前子表墨迹密度自适应左右晕染，再寻找横向行白缝。"""
+
+    density = max(0.01, float(ink.mean()))
+    dilate_ratio = float(
+        np.clip(
+            0.015 * 0.10 / density,
+            config.body_row_dilate_min_ratio,
+            config.body_row_dilate_max_ratio,
+        )
+    )
+    kernel = max(3, round(ink.shape[1] * dilate_ratio))
+    expanded = cv2.dilate(
+        ink.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, 1)),
+    ).astype(bool)
+    rows = [
+        round((start + end - 1) / 2)
+        for start, end in _runs(
+            expanded.mean(axis=1) <= config.whitespace_blank_ratio
+        )
+        if end - start >= config.whitespace_min_band
+    ]
+    return rows, dilate_ratio
+
 def _first_stable_column_bands(profile, config):
     """列白缝从1px向上寻找，第一次连续稳定就停止。"""
     raw=[WhiteColumnBand(a,b) for a,b in _runs(profile<=config.whitespace_blank_ratio)
@@ -1082,7 +1109,7 @@ def detect_v6_grid(
     *,
     black_analysis_image: Image.Image | None = None,
 ) -> tuple[GridStructure, V6GridDiagnostics]:
-    """用50%图找黑线和稳定表体列缝，20%图保留行白带兜底，再映射回原图。"""
+    """用同一张50%图找黑线、行白缝和稳定表体列缝，再映射回原图。"""
 
     # 白带链路保持原来的 20% 灰度图不变。
     white_gray = np.asarray(analysis_image.convert("L"))
@@ -1186,7 +1213,9 @@ def detect_v6_grid(
         if white_row_has_black
         else white_ink
     )
-    white_rows = _whitespace_centers(ink_for_rows, config)[0]
+    white_rows, white_row_dilate_ratio = _adaptive_white_rows(
+        ink_for_rows, config
+    )
     row_is_black, row_black_reason = _black_lines_are_distributed(
         black_rows,
         black_image.height,
@@ -1194,92 +1223,14 @@ def detect_v6_grid(
         config.grid_interior_margin_ratio,
     )
 
-    (
-        raw_white_column_bands,
-        used_white_column_bands,
-        rejected_white_column_bands,
-        white_column_min_band,
-        white_column_regularity_before,
-        white_column_regularity_after,
-        white_column_cleanup,
-    ) = select_adaptive_white_column_bands(ink_for_columns, config)
-    # 分析框会保留少量安全留白；与外沿直接相连的白带属于外框，不应
-    # 再额外制造一列。这里只吸收“碰到外沿”的带，不恢复旧版3%删除。
-    (
-        raw_white_column_bands,
-        used_white_column_bands,
-        rejected_white_column_bands,
-    ) = _remove_outer_white_column_bands(
-        raw_white_column_bands,
-        used_white_column_bands,
-        rejected_white_column_bands,
-        analysis_image.width,
-        white_column_min_band,
-    )
-    white_column_regularity_before = _white_column_spacing_regularity(
-        raw_white_column_bands
-    )
-    white_column_regularity_after = _white_column_spacing_regularity(
-        used_white_column_bands
-    )
-
-    # d8b、0f372一类长无框表的表头文字会横跨真实列缝，若在整张区域上
-    # 统计，会把一个列缝切成许多碎白带。行很多时，再用去掉少量表头页脚
-    # 的数据主体区复核；只有间距达到高稳定度且显著优于全图时才采用。
-    body_columns = _select_body_column_bands(
-        ink_for_columns,
-        white_rows,
-        config,
-    )
-    if body_columns is not None:
-        (
-            body_raw,
-            body_used,
-            body_rejected,
-            body_min_band,
-            body_before,
-            body_after,
-            body_cleanup,
-        ) = body_columns
-        body_boundaries = tuple(
-            dict.fromkeys([0, *[band.position for band in body_used], analysis_image.width])
-        )
-        body_cells_ok = _boundaries_have_reasonable_cells(
-            body_boundaries,
-            config.grid_max_cell_span_ratio,
-        )[0]
-        improvement = body_after - white_column_regularity_after
-        # 0f372只漏了一条真实列缝：主体区稳定度与全图接近，但候选数恰好
-        # 多1根。此类“小幅补回”不要求提升8个百分点，只要求主体本身仍
-        # 足够规律，且最多增加2根，防止重新引入几十条表头碎白带。
-        small_recovery = (
-            0 < len(body_used) - len(used_white_column_bands) <= 2
-            and body_after >= white_column_regularity_after
-            and body_after
-            >= config.whitespace_column_regular_spacing_ratio - 0.05
-        )
-        if (
-            body_cells_ok
-            and len(body_used) >= 2
-            and (
-                improvement >= config.whitespace_column_min_regularity_gain
-                or small_recovery
-            )
-        ):
-            full_cleanup = white_column_cleanup
-            raw_white_column_bands = body_raw
-            used_white_column_bands = body_used
-            rejected_white_column_bands = body_rejected
-            white_column_min_band = body_min_band
-            white_column_regularity_before = body_before
-            white_column_regularity_after = body_after
-            white_column_cleanup = (
-                f"全图列白带稳定度"
-                f"{white_column_regularity_after - improvement:.1%}；"
-                f"改用{body_cleanup}；原全图处理：{full_cleanup}"
-            )
-
-    # 新主体算法优先使用50%图。黑线可靠时不介入，避免白缝干扰有线网格。
+    # 列白缝只接受50%滑窗表体的首稳结果；失败时不再启用旧20%兜底。
+    raw_white_column_bands = []
+    used_white_column_bands = []
+    rejected_white_column_bands = []
+    white_column_min_band = 0
+    white_column_regularity_before = 0.0
+    white_column_regularity_after = 0.0
+    white_column_cleanup = ""
     body_selection = None
     body_window_selected = None
     body_window_box = None
@@ -1288,11 +1239,7 @@ def detect_v6_grid(
     body_window_results = ()
     body_window_cleanup = ""
     white_column_uses_black_scale = False
-    if (
-        not column_is_black
-        and not column_uses_sparse_black
-        and black_image.size != analysis_image.size
-    ):
+    if not column_is_black and not column_uses_sparse_black:
         body_selection = _select_sliding_body_columns(
             black_ink,
             black_rows,
@@ -1308,87 +1255,26 @@ def detect_v6_grid(
             body_window_cleanup = str(body_selection.get("message", ""))
             body_used = list(body_selection.get("used", ()))
             body_raw = list(body_selection.get("raw", ()))
+            raw_white_column_bands = body_raw
             if body_used:
-                raw_white_column_bands = body_raw
                 used_white_column_bands = body_used
-                rejected_white_column_bands = []
                 white_column_min_band = int(body_selection["threshold"])
-                white_column_regularity_before = _white_column_spacing_regularity(body_raw)
-                white_column_regularity_after = _white_column_spacing_regularity(body_used)
+                white_column_regularity_before = _white_column_spacing_regularity(
+                    body_raw
+                )
+                white_column_regularity_after = _white_column_spacing_regularity(
+                    body_used
+                )
                 white_column_cleanup = (
                     f"{body_window_cleanup}；"
-                    "列白缝坐标采用50%表体图，后续映射回原图"
+                    "列白缝坐标采用50%统一分析图，后续映射回原图"
                 )
                 white_column_uses_black_scale = True
-
-    # 20%图在超宽密集表上可能把细列缝压没。只有常规列白带本身无法形成
-    # 可信网格时，才在50%图上重试；重试前必须擦掉贯穿全宽的横线，否则
-    # 几根粗横线就足以让每一列的墨水比例超过1%。
-    low_column_boundaries = tuple(
-        dict.fromkeys(
-            [
-                0,
-                *[band.position for band in used_white_column_bands],
-                (
-                    black_image.width
-                    if white_column_uses_black_scale
-                    else analysis_image.width
-                ),
-            ]
-        )
-    )
-    low_columns_ok = _boundaries_have_reasonable_cells(
-        low_column_boundaries,
-        config.grid_max_cell_span_ratio,
-    )[0]
-    if (
-        not column_is_black
-        and not column_uses_sparse_black
-        and not low_columns_ok
-        and not white_column_uses_black_scale
-        and black_image.size != analysis_image.size
-    ):
-        high_ink_for_columns = (
-            _erase_perpendicular_lines(black_ink, black_rows, axis=0)
-            if black_rows
-            else black_ink
-        )
-        (
-            high_raw_bands,
-            high_used_bands,
-            high_rejected_bands,
-            high_min_band,
-            high_regularity_before,
-            high_regularity_after,
-            high_cleanup,
-        ) = select_adaptive_white_column_bands(high_ink_for_columns, config)
-        high_column_boundaries = tuple(
-            dict.fromkeys(
-                [
-                    0,
-                    *[band.position for band in high_used_bands],
-                    black_image.width,
-                ]
-            )
-        )
-        high_columns_ok = _boundaries_have_reasonable_cells(
-            high_column_boundaries,
-            config.grid_max_cell_span_ratio,
-        )[0]
-        if high_columns_ok and len(high_used_bands) > len(used_white_column_bands):
-            low_cleanup = white_column_cleanup
-            raw_white_column_bands = high_raw_bands
-            used_white_column_bands = high_used_bands
-            rejected_white_column_bands = high_rejected_bands
-            white_column_min_band = high_min_band
-            white_column_regularity_before = high_regularity_before
-            white_column_regularity_after = high_regularity_after
-            white_column_cleanup = (
-                f"20%常规图不可信：{low_cleanup}；"
-                f"改用50%图并擦除{len(black_rows)}根横线：{high_cleanup}"
-            )
-            white_column_uses_black_scale = True
-
+            else:
+                white_column_cleanup = (
+                    f"{body_window_cleanup}；不启用旧白带兜底，"
+                    "最终物理网格检查将按fatal error处理"
+                )
     partial_rows, partial_row_reason = _white_rows_reveal_partial_black_grid(
         black_rows,
         white_rows,
@@ -1420,7 +1306,9 @@ def detect_v6_grid(
                 white_black_columns,
                 axis=1,
             )
-            retry_white_rows = _whitespace_centers(retry_row_ink, config)[0]
+            retry_white_rows, white_row_dilate_ratio = _adaptive_white_rows(
+                retry_row_ink, config
+            )
             hybrid_row_centers, hybrid_reason = _hybrid_sparse_row_centers(
                 white_black_rows,
                 retry_white_rows,
@@ -1471,7 +1359,7 @@ def detect_v6_grid(
             "sparse-black-lines-0.95-contrast"
             if column_uses_sparse_black
             else (
-                "white-band-50%-fallback"
+                "white-band-50%-sliding-body"
                 if white_column_uses_black_scale
                 else "white-band"
             )
@@ -1500,6 +1388,7 @@ def detect_v6_grid(
             white_column_regularity_after=white_column_regularity_after,
             white_column_cleanup=white_column_cleanup,
             white_column_uses_black_scale=white_column_uses_black_scale,
+            white_row_dilate_ratio=white_row_dilate_ratio,
             body_window_selected=body_window_selected,
             body_window_box=body_window_box,
             body_window_height=body_window_height,
@@ -1589,6 +1478,7 @@ def detect_v6_grid(
         white_column_regularity_after=white_column_regularity_after,
         white_column_cleanup=white_column_cleanup,
         white_column_uses_black_scale=white_column_uses_black_scale,
+        white_row_dilate_ratio=white_row_dilate_ratio,
         body_window_selected=body_window_selected,
         body_window_box=body_window_box,
         body_window_height=body_window_height,

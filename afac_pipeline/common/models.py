@@ -140,6 +140,8 @@ class PreparedRegion:
     column_boundaries: list[int] = field(default_factory=list)
     raw_column_boundaries: list[int] = field(default_factory=list)
     rejected_column_boundaries: list[int] = field(default_factory=list)
+    # R×C物理网格形成后，逐格记录内部是否存在墨迹。
+    cell_ink_mask: list[list[bool]] = field(default_factory=list)
     # 表格物理网格上方、分析框顶部到第一根横线之间的候选标题区。
     # 它只作为表前 Markdown 识别，不进入 R×C 网格。
     top_context: dict[str, Any] | None = None
@@ -154,6 +156,7 @@ class PreparedRegion:
             "column_boundaries": self.column_boundaries,
             "raw_column_boundaries": self.raw_column_boundaries,
             "rejected_column_boundaries": self.rejected_column_boundaries,
+            "cell_ink_mask": self.cell_ink_mask,
             "top_context": self.top_context,
             "tiles": [tile.to_dict() for tile in self.tiles],
         }

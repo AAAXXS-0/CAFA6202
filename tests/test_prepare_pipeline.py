@@ -2,9 +2,11 @@ from pathlib import Path
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+from afac_pipeline.long import LongConfig, LongPipeline
 from afac_pipeline.table.config import TableConfig
 from afac_pipeline.table.步骤011_全流程调度 import TablePipeline
 
@@ -73,6 +75,18 @@ class PreparePipelineTest(unittest.TestCase):
             prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
             region = prepared["regions"][0]
             self.assertEqual(region["grid_source"], "ruled-lines")
+            cell_ink_mask = region["cell_ink_mask"]
+            self.assertEqual(
+                len(cell_ink_mask),
+                len(region["row_boundaries"]) - 1,
+            )
+            self.assertTrue(cell_ink_mask)
+            self.assertTrue(
+                all(
+                    len(row) == len(region["column_boundaries"]) - 1
+                    for row in cell_ink_mask
+                )
+            )
             self.assertTrue(
                 all(not tile["header_context_rows"] for tile in region["tiles"])
             )
@@ -86,6 +100,98 @@ class PreparePipelineTest(unittest.TestCase):
                     self.assertEqual(output.size, expected)
                     self.assertLessEqual(max(output.size), 512)
                     self.assertEqual(tile["scale"], 1.0)
+
+            second_dataset = json.loads(
+                pipeline.prepare_directory(input_dir).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                second_dataset["items"][0]["preprocessing_cache"],
+                "reused",
+            )
+            self.assertEqual(
+                Path(second_dataset["items"][0]["image_manifest"]),
+                prepared_path,
+            )
+            self.assertTrue(
+                Path(second_dataset["preprocessing_summary_html"]).is_file()
+            )
+            chinese_artifacts = Path(
+                second_dataset["items"][0]["chinese_artifacts"]
+            )
+            self.assertTrue(
+                (chinese_artifacts / "000_中间产物说明.json").is_file()
+            )
+            self.assertTrue(
+                (chinese_artifacts / "900_识别切块位置总览.png").is_file()
+            )
+
+
+    def test_batch_prepare_collects_fatal_and_keeps_successes(self) -> None:
+        """一键批量模式不能因首张坏图丢掉后续图片的检查结果。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir = root / "images"
+            input_dir.mkdir()
+            Image.new("RGB", (32, 32), "red").save(input_dir / "bad.png")
+            Image.new("RGB", (32, 32), "blue").save(input_dir / "good.png")
+
+            pipelines = [
+                (
+                    "长图",
+                    LongPipeline(
+                        LongConfig(backend="pillow"),
+                        root / "long_work",
+                    ),
+                ),
+                (
+                    "图表",
+                    TablePipeline(
+                        TableConfig(backend="pillow"),
+                        root / "table_work",
+                    ),
+                ),
+            ]
+            for branch, pipeline in pipelines:
+                with self.subTest(branch=branch):
+                    def fake_prepare(image_path: Path, image_sha256: str) -> Path:
+                        if image_path.name == "bad.png":
+                            raise RuntimeError(f"{branch}测试fatal")
+                        output = pipeline.work_dir / image_sha256 / "manifest.json"
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.write_text("{}", encoding="utf-8")
+                        return output
+
+                    with patch.object(
+                        pipeline,
+                        "_prepare_one",
+                        side_effect=fake_prepare,
+                    ):
+                        manifest_path = pipeline.prepare_directory(
+                            input_dir,
+                            continue_on_error=True,
+                        )
+
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(manifest["image_count"], 2)
+                    self.assertEqual(manifest["prepared_image_count"], 1)
+                    self.assertEqual(manifest["failed_image_count"], 1)
+                    self.assertEqual(
+                        [item["file_name"] for item in manifest["items"]],
+                        ["good.png"],
+                    )
+                    self.assertEqual(
+                        manifest["preprocessing_failures"][0]["file_names"],
+                        ["bad.png"],
+                    )
+                    report = Path(manifest["preprocessing_failure_report"])
+                    self.assertTrue(report.is_file())
+                    report_data = json.loads(
+                        report.read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(report_data["failure_count"], 1)
 
 
 if __name__ == "__main__":

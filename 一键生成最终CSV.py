@@ -1,11 +1,13 @@
-"""AFAC 2026 一键准备、识别并生成最终 100 行提交 CSV。
+"""AFAC 2026 一键预处理、识别并生成最终提交 CSV。
 
-直接运行本文件，不需要输入任何命令行参数。默认并行识别 6 张唯一图片；
-API 或网络中断后再次运行即可，SQLite 会复用成功的切片和整图结果。
+默认先完整检查两类图片：任何单图出现 fatal 都会被记录，待预处理全部结束后
+统一报告，并且不会进入 API。使用 --force-api 时可跳过没有成功预处理清单的
+图片，只识别已有成功清单；这种模式只生成部分结果，不能直接提交。
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
@@ -39,6 +41,25 @@ from afac_pipeline.table import TableConfig, TablePipeline
 # Python 的 csv 模块默认只允许单个字段约 128 KiB。图表识别结果保存的是完整
 # HTML，大表很容易超过这个值；这里只放宽读取限制，不会修改或截断识别内容。
 csv.field_size_limit(sys.maxsize)
+
+
+def 解析参数() -> argparse.Namespace:
+    """解析一键脚本参数；保留中文别名，方便直接照 README 使用。"""
+
+    parser = argparse.ArgumentParser(
+        description="默认先完整预处理；存在 fatal 时汇总错误并停在 API 之前。"
+    )
+    parser.add_argument(
+        "--force-api",
+        "--强制进入API",
+        action="store_true",
+        dest="force_api",
+        help=(
+            "即使预处理不完整，也仅用现有成功清单进入 API；"
+            "没有预处理缓存的图片直接跳过，只输出部分结果。"
+        ),
+    )
+    return parser.parse_args()
 
 
 def 检查固定文件() -> None:
@@ -77,37 +98,165 @@ def 检查固定文件() -> None:
     )
 
 
-def 准备清单可复用(manifest_path: Path, config_digest: str, input_dir: Path) -> bool:
-    """只有配置和输入目录都一致时才复用准备清单。"""
+def 读取准备清单(manifest_path: Path) -> dict:
+    """读取数据集准备清单；损坏清单视为不可复用。"""
+
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def 准备清单可复用(
+    manifest_path: Path,
+    config_digest: str,
+    input_dir: Path,
+    *,
+    allow_incomplete: bool = False,
+) -> bool:
+    """检查清单是否匹配；默认不复用含 fatal 或缺图的不完整清单。"""
 
     if not manifest_path.is_file():
         return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    manifest = 读取准备清单(manifest_path)
+    if (
+        manifest.get("config_digest") != config_digest
+        or Path(manifest.get("input_dir", "")).resolve() != input_dir.resolve()
+    ):
         return False
+    if allow_incomplete:
+        # 强制模式保留成功图片，避免为了失败图片再跑整套预处理。
+        return True
+    # schema 3 才具备逐图断点、中文中间产物和持续汇总。旧清单会
+    # 进入一次新调度，但完整的单图 manifest 会直接复用，不会重新计算。
+    if int(manifest.get("schema_version", 0)) < 3:
+        return False
+    summary_html = manifest.get("preprocessing_summary_html")
+    if not summary_html or not Path(summary_html).is_file():
+        return False
+    image_count = int(manifest.get("image_count", -1))
+    prepared_count = int(
+        manifest.get("prepared_image_count", len(manifest.get("items", [])))
+    )
     return (
-        manifest.get("config_digest") == config_digest
-        and Path(manifest.get("input_dir", "")).resolve() == input_dir.resolve()
+        not manifest.get("preprocessing_failures")
+        and image_count >= 0
+        and prepared_count == image_count
     )
 
 
-def 准备长图(config: LongConfig, work_dir: Path) -> Path:
+def 准备长图(
+    config: LongConfig,
+    work_dir: Path,
+    *,
+    allow_incomplete: bool,
+) -> Path:
     manifest = work_dir / "dataset_manifest.json"
-    if 准备清单可复用(manifest, config.digest(), 长图输入目录):
+    if 准备清单可复用(
+        manifest,
+        config.digest(),
+        长图输入目录,
+        allow_incomplete=allow_incomplete,
+    ):
         print(f"[长图准备] 复用现有清单：{manifest}", flush=True)
         return manifest
-    print("[长图准备] 配置或清单有变化，开始滑窗检测与二次切块", flush=True)
-    return LongPipeline(config, work_dir).prepare_directory(长图输入目录)
+    print("[长图准备] 配置或清单有变化，开始检测与二次切块", flush=True)
+    return LongPipeline(config, work_dir).prepare_directory(
+        长图输入目录,
+        continue_on_error=True,
+    )
 
 
-def 准备图表(config: TableConfig, work_dir: Path) -> Path:
+def 准备图表(
+    config: TableConfig,
+    work_dir: Path,
+    *,
+    allow_incomplete: bool,
+) -> Path:
     manifest = work_dir / "dataset_manifest.json"
-    if 准备清单可复用(manifest, config.digest(), 图表输入目录):
+    if 准备清单可复用(
+        manifest,
+        config.digest(),
+        图表输入目录,
+        allow_incomplete=allow_incomplete,
+    ):
         print(f"[图表准备] 复用现有清单：{manifest}", flush=True)
         return manifest
     print("[图表准备] 配置或清单有变化，开始检测与切块", flush=True)
-    return TablePipeline(config, work_dir).prepare_directory(图表输入目录)
+    return TablePipeline(config, work_dir).prepare_directory(
+        图表输入目录,
+        continue_on_error=True,
+    )
+
+
+def 收集预处理错误(branch: str, manifest_path: Path) -> list[dict]:
+    """汇总 fatal，并找出旧清单中没有成功预处理缓存的图片。"""
+
+    manifest = 读取准备清单(manifest_path)
+    report_path = manifest.get("preprocessing_failure_report")
+    failures: list[dict] = []
+    failed_names: set[str] = set()
+    for raw in manifest.get("preprocessing_failures", []):
+        item = dict(raw)
+        item["branch"] = branch
+        item["report_path"] = report_path
+        failures.append(item)
+        failed_names.update(item.get("file_names", []))
+
+    # 兼容以前生成的不完整清单：旧清单可能缺少明确的 fatal 数组，但
+    # items 之外的图片同样没有可供 API 使用的预处理缓存。
+    prepared_names = {
+        str(item.get("file_name"))
+        for item in manifest.get("items", [])
+        if item.get("file_name")
+    }
+    input_value = manifest.get("input_dir")
+    input_dir = Path(str(input_value)) if input_value else None
+    if input_dir is not None and input_dir.is_dir():
+        all_names = {path.name for path in discover_images(input_dir)}
+        for file_name in sorted(all_names - prepared_names - failed_names):
+            failures.append(
+                {
+                    "branch": branch,
+                    "canonical_file_name": file_name,
+                    "file_names": [file_name],
+                    "error_type": "MissingPreprocessingCache",
+                    "error": "准备清单中没有该图片的成功预处理缓存",
+                    "report_path": report_path,
+                }
+            )
+    return failures
+
+def 打印预处理错误(failures: list[dict], *, forced: bool) -> None:
+    """一次性报告所有预处理失败图片，并说明是否会进入 API。"""
+
+    title = (
+        "[强制 API] 以下图片没有成功预处理，将跳过"
+        if forced
+        else "[预处理未通过] 以下图片出现 fatal"
+    )
+    print(f"\n{title}：", flush=True)
+    for index, failure in enumerate(failures, start=1):
+        file_names = "、".join(
+            failure.get("file_names")
+            or [failure.get("canonical_file_name", "未知图片")]
+        )
+        print(
+            f"{index}. [{failure.get('branch', '未知分支')}] {file_names}\n"
+            f"   {failure.get('error_type', 'Error')}："
+            f"{failure.get('error', '未知错误')}",
+            flush=True,
+        )
+    reports = sorted(
+        {
+            str(failure["report_path"])
+            for failure in failures
+            if failure.get("report_path")
+        }
+    )
+    for report in reports:
+        print(f"   详细记录：{report}", flush=True)
 
 
 def 迁移旧缓存(work_root: Path, branch: str, current_work: Path) -> None:
@@ -142,6 +291,7 @@ def 检查输出行数(path: Path, expected: int) -> None:
 
 
 def main() -> int:
+    args = 解析参数()
     os.chdir(项目根目录)
     检查固定文件()
 
@@ -168,8 +318,35 @@ def main() -> int:
         print("[检查模式] 固定文件、模板、配置和工作目录均正常；不切图、不调用 API", flush=True)
         return 0
 
-    long_manifest = 准备长图(long_config, long_work)
-    table_manifest = 准备图表(table_config, table_work)
+    long_manifest = 准备长图(
+        long_config,
+        long_work,
+        allow_incomplete=args.force_api,
+    )
+    table_manifest = 准备图表(
+        table_config,
+        table_work,
+        allow_incomplete=args.force_api,
+    )
+    preprocessing_failures = [
+        *收集预处理错误("长图", long_manifest),
+        *收集预处理错误("图表", table_manifest),
+    ]
+    if preprocessing_failures:
+        打印预处理错误(preprocessing_failures, forced=args.force_api)
+        if not args.force_api:
+            print(
+                "\n[已停止] 预处理已检查完毕，但存在 fatal；"
+                "本轮不会初始化客户端，也不会调用 API。",
+                flush=True,
+            )
+            return 1
+        print(
+            "\n[强制 API] 仅识别清单中已成功预处理的图片；"
+            "最终只生成部分结果，不能直接提交。",
+            flush=True,
+        )
+
     迁移旧缓存(work_root, "长图", long_work)
     迁移旧缓存(work_root, "图表", table_work)
     request_timeout = int(
@@ -198,43 +375,75 @@ def main() -> int:
         timeout=request_timeout,
         max_retries=max_retries,
     )
-    输出目录.mkdir(parents=True, exist_ok=True)
-    long_csv = 输出目录 / "长图结果.csv"
-    table_csv = 输出目录 / "图表结果.csv"
+    partial_mode = bool(preprocessing_failures)
+    run_output_dir = (
+        输出目录 / "强制API部分结果" if partial_mode else 输出目录
+    )
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+    long_csv = run_output_dir / (
+        "长图部分结果.csv" if partial_mode else "长图结果.csv"
+    )
+    table_csv = run_output_dir / (
+        "图表部分结果.csv" if partial_mode else "图表结果.csv"
+    )
     final_csv = 输出目录 / "finix_ab_A_submit.csv"
 
     failures: list[str] = []
-    try:
-        print("[长图识别] 开始调用 FinixDoc-VL", flush=True)
-        LongPipeline(long_config, long_work).recognize_dataset(
-            long_manifest,
-            client,
-            long_csv,
-            max_workers=workers,
-        )
-        检查输出行数(long_csv, 50)
-    except Exception as error:  # 保留另一分支继续积累缓存
-        failures.append(f"长图识别失败：{error}")
-        print(f"[长图识别失败] {error}", flush=True)
 
-    try:
-        print("[图表识别] 开始调用 FinixDoc-VL", flush=True)
-        TablePipeline(table_config, table_work).recognize_dataset(
-            table_manifest,
-            client,
-            table_csv,
-            max_workers=workers,
-        )
-        检查输出行数(table_csv, 50)
-    except Exception as error:  # 保留长图已完成的缓存
-        failures.append(f"图表识别失败：{error}")
-        print(f"[图表识别失败] {error}", flush=True)
+    def 分支项目数(manifest_path: Path) -> int:
+        return len(读取准备清单(manifest_path).get("items", []))
+
+    if 分支项目数(long_manifest) == 0:
+        print("[长图识别] 没有成功预处理的图片，整条分支跳过。", flush=True)
+    else:
+        try:
+            print("[长图识别] 开始调用 FinixDoc-VL", flush=True)
+            LongPipeline(long_config, long_work).recognize_dataset(
+                long_manifest,
+                client,
+                long_csv,
+                max_workers=workers,
+            )
+            if not partial_mode:
+                检查输出行数(long_csv, 50)
+        except Exception as error:  # 保留另一分支继续积累缓存
+            failures.append(f"长图识别失败：{error}")
+            print(f"[长图识别失败] {error}", flush=True)
+
+    if 分支项目数(table_manifest) == 0:
+        print("[图表识别] 没有成功预处理的图片，整条分支跳过。", flush=True)
+    else:
+        try:
+            print("[图表识别] 开始调用 FinixDoc-VL", flush=True)
+            TablePipeline(table_config, table_work).recognize_dataset(
+                table_manifest,
+                client,
+                table_csv,
+                max_workers=workers,
+            )
+            if not partial_mode:
+                检查输出行数(table_csv, 50)
+        except Exception as error:  # 保留长图已完成的缓存
+            failures.append(f"图表识别失败：{error}")
+            print(f"[图表识别失败] {error}", flush=True)
 
     if failures:
         print("\n本轮没有生成最终 CSV。无需清理，稍后重新运行本文件即可续跑：")
         for failure in failures:
             print(f"- {failure}")
         return 1
+
+    if partial_mode:
+        print(
+            "\n[强制 API 完成] 已跳过无预处理清单的图片；"
+            "本轮不会生成或覆盖正式 100 行提交 CSV。",
+            flush=True,
+        )
+        if long_csv.exists():
+            print(f"- 长图部分结果：{long_csv}", flush=True)
+        if table_csv.exists():
+            print(f"- 图表部分结果：{table_csv}", flush=True)
+        return 0
 
     combine_submissions([long_csv, table_csv], 官方提交模板, final_csv)
     检查输出行数(final_csv, 100)
