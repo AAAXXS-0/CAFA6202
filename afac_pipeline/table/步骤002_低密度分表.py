@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 from ..common.models import Box
@@ -99,6 +100,7 @@ def _profile_bands(
         ):
             continue
         band_width = end - start
+        razor_clear = False
         if band_width < minimum_band:
             # 5% 密度图会把真实表间空白压到 2 像素。不能无条件把最小宽度
             # 降到 2，否则表内行距也会参与分表；只有“本身几乎全白，且上下
@@ -109,7 +111,21 @@ def _profile_bands(
                 and float(before.mean()) >= narrow_band_content_density
                 and float(after.mean()) >= narrow_band_content_density
             )
-            if not exceptionally_clear:
+            # 超宽图固定缩到 5% 后，原图几十像素的真实表间空白可能只剩
+            # 1 个像素。此时不能再看绝对宽度，而要看它是否是一个非常深、
+            # 且左右（横向分表时即上下）立刻回到内容区的“刀口低谷”。
+            # 该条件比普通窄带严格得多，避免把表内普通行距拿来分表。
+            immediate_before = float(profile[start - 1]) if start > 0 else 0.0
+            immediate_after = float(profile[end]) if end < length else 0.0
+            razor_clear = (
+                band_width == 1
+                and band_mean <= min(narrow_band_maximum_mean, 0.0025)
+                and immediate_before >= content_density
+                and immediate_after >= content_density
+                and float(before.mean()) >= content_density
+                and float(after.mean()) >= content_density
+            )
+            if not exceptionally_clear and not razor_clear:
                 continue
         bands.append(
             DensityBand(
@@ -117,7 +133,11 @@ def _profile_bands(
                 start=start,
                 end=end,
                 mean_density=band_mean,
-                source="+".join(sorted(sources)),
+                source=(
+                    "+".join([*sorted(sources), "razor"])
+                    if razor_clear
+                    else "+".join(sorted(sources))
+                ),
             )
         )
     return bands
@@ -179,6 +199,13 @@ def _select_axis_bands(
             selected.append(
                 max(group, key=lambda band: (band.end - band.start, -band.mean_density))
             )
+    # 1像素“刀口”只用于185a这类少量孤立低谷。若同一方向连续出现
+    # 3条以上，通常是长表每隔若干行重复一次的内部留白（d8b即如此）；
+    # 此时撤销所有刀口候选，但仍保留原本达到常规宽度的分表带。
+    razor_count = sum("razor" in band.source for band in selected)
+    if razor_count >= 3:
+        selected = [band for band in selected if "razor" not in band.source]
+
     if len(selected) >= 2:
         spacing = float(np.median(np.diff([band.center for band in selected])))
         # 如果候选低谷像单元格一样密集重复，它们是内部行列而不是同图异表。
@@ -278,6 +305,110 @@ def find_density_bands(
         return rows, []
     return [], columns
 
+
+def _merge_horizontal_gap_fragments(raw_gaps, row_density):
+    """把被窄标题或表头打断的上下两段白缝重新合并。"""
+    if not raw_gaps:
+        return []
+    max_bridge=max(2,round(len(row_density)*0.02))
+    typical=float(np.median([b-a for a,b in raw_gaps]))
+    side_min=max(2,round(typical*0.75))
+    merged=[]; index=0
+    while index<len(raw_gaps):
+        start,end=raw_gaps[index]
+        while index+1<len(raw_gaps):
+            next_start,next_end=raw_gaps[index+1]
+            bridge=next_start-end
+            if len(raw_gaps)<=12 and typical>=4.0 and end-start>=side_min and next_end-next_start>=side_min and 0<bridge<=max_bridge:
+                end=next_end; index+=1
+            else:
+                break
+        merged.append((start,end)); index+=1
+    return merged
+
+def _normalize_gap_ranges(ranges):
+    normalized=[]
+    for start,end in sorted(ranges):
+        if end<=start: continue
+        if normalized and start<=normalized[-1][1]:
+            normalized[-1]=(normalized[-1][0],max(normalized[-1][1],end))
+        else:
+            normalized.append((start,end))
+    return normalized
+
+def _horizontal_segment_owners(flags):
+    bodies=[i for i,value in enumerate(flags) if value]
+    if not bodies: return [0 for _ in flags]
+    owners=[]
+    for index,is_body in enumerate(flags):
+        if is_body: owners.append(index); continue
+        next_body=next((i for i in bodies if i>index),None)
+        previous=next((i for i in reversed(bodies) if i<index),None)
+        owners.append(next_body if next_body is not None else previous)
+    return owners
+
+def _safe_horizontal_cut(gap,raw_gaps):
+    contained=[raw for raw in raw_gaps if gap[0]<=raw[0] and raw[1]<=gap[1]]
+    selected=contained[0] if len(contained)>=2 else gap
+    return round((selected[0]+selected[1]-1)/2)
+
+def horizontal_table_split_boxes(
+    preview,
+    *,
+    gray_threshold=225,
+    horizontal_smear_ratio=0.01,
+    blank_row_ratio=0.01,
+):
+    """只按上下方向分表；返回20%分析图坐标中的分表框。"""
+    gray=np.asarray(preview.convert("L"))
+    ink=(gray<gray_threshold).astype(np.uint8)
+    smear_width=max(3,round(preview.width*horizontal_smear_ratio))
+    smeared=cv2.dilate(ink,cv2.getStructuringElement(cv2.MORPH_RECT,(smear_width,1)))
+    row_density=smeared.mean(axis=1)
+    hard_content=row_density>blank_row_ratio
+    content_runs=_runs(hard_content)
+    if not content_runs:
+        return [Box(0,0,preview.width,preview.height)],[],{"raw_gaps":[],"final_gaps":[]}
+    content_start,content_end=content_runs[0][0],content_runs[-1][1]
+    raw_gaps=[(a,b) for a,b in _runs(~hard_content) if content_start<a and b<content_end]
+    merged=_merge_horizontal_gap_fragments(raw_gaps,row_density)
+    soft=[(a,b) for a,b in _runs((row_density<=0.05)&hard_content) if b-a<=8]
+    enabled_soft=[gap for gap in soft if len(raw_gaps)>12 and content_start<gap[0] and gap[1]<content_end]
+    all_gaps=_normalize_gap_ranges(merged+enabled_soft)
+    base=merged or enabled_soft
+    widths=[b-a for a,b in base]
+    typical=float(np.median(widths)) if widths else 0.0
+    relaxed=len(raw_gaps)<=12 and typical>=5.0
+    minimum=max(3,round(typical*(1.0 if relaxed else 2.0)))
+    candidates=[gap for gap in all_gaps if gap[1]-gap[0]>=minimum]
+    edges=[content_start,*[v for gap in candidates for v in gap],content_end]
+    segment_ranges=[(edges[i],edges[i+1]) for i in range(0,len(edges)-1,2)]
+    minimum_height=max(8,round(preview.height*0.02))
+    minimum_active=max(6,minimum_height//3)
+    segments=[]
+    for start,end in segment_ranges:
+        height=end-start; active=int(hard_content[start:end].sum())
+        segments.append((start,end,height,active,height>=minimum_height and active>=minimum_active))
+    owners=_horizontal_segment_owners([item[4] for item in segments])
+    final=[candidates[i] for i in range(len(candidates)) if owners[i] is not None and owners[i+1] is not None and owners[i]!=owners[i+1]]
+    for index,gap in enumerate(candidates):
+        if gap in final: continue
+        left,right=segments[index],segments[index+1]
+        for small,body in ((left,right),(right,left)):
+            if small[4] or not body[4]: continue
+            small_density=float(row_density[small[0]:small[1]].mean())
+            body_density=float(row_density[body[0]:body[1]].mean())
+            enough_height=small[2]>=max(8,round(minimum_height*0.5))
+            enough_ink=small[3]>=minimum_active
+            table_like=small_density>=0.15 and small_density>=body_density*0.55
+            if enough_height and enough_ink and table_like:
+                final.append(gap); break
+    final=sorted(set(final))
+    cuts=[_safe_horizontal_cut(gap,raw_gaps) for gap in final]
+    boundaries=[content_start,*cuts,content_end]
+    boxes=[Box(0,y1,preview.width,y2) for y1,y2 in zip(boundaries,boundaries[1:]) if y2>y1]
+    bands=[DensityBand("horizontal",a,b,float(row_density[a:b].mean()),"horizontal-v2") for a,b in final]
+    return boxes,bands,{"raw_gaps":raw_gaps,"merged_gaps":merged,"soft_gaps":soft,"candidate_gaps":candidates,"final_gaps":final,"cut_positions":cuts,"row_density":row_density}
 
 def boxes_from_bands(
     width: int,

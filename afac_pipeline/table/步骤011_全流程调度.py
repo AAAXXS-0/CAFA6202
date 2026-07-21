@@ -377,6 +377,57 @@ class TablePipeline:
         draw.text((8, 8), grid.source, fill=color)
         overlay.save(analysis_dir / f"region_{region_index:03d}_boundaries.png")
         if diagnostics is not None:
+            # 表体滑窗中间图：红框是不稳定/未选窗口，绿框是最终连续表体段。
+            if diagnostics.body_window_results:
+                body_overlay = black_analysis.copy()
+                body_draw = ImageDraw.Draw(body_overlay)
+                selected_indices = (
+                    set(range(*diagnostics.body_window_selected))
+                    if diagnostics.body_window_selected is not None
+                    else set()
+                )
+                for window_index, window in enumerate(
+                    diagnostics.body_window_results
+                ):
+                    color = (
+                        (0, 180, 0)
+                        if window_index in selected_indices
+                        else (220, 60, 60)
+                    )
+                    start = int(window["start"])
+                    end = int(window["end"])
+                    body_draw.rectangle(
+                        (0, start, body_overlay.width - 1, end - 1),
+                        outline=color,
+                        width=4,
+                    )
+                    body_draw.text(
+                        (8, start + 4),
+                        (
+                            f"W{window_index:02d} "
+                            f"bands={window['band_count']} "
+                            f"threshold={window['threshold']}"
+                        ),
+                        fill=color,
+                    )
+                if diagnostics.body_window_box is not None:
+                    x1, y1, x2, y2 = diagnostics.body_window_box
+                    body_draw.rectangle(
+                        (x1, y1, x2 - 1, y2 - 1),
+                        outline=(255, 180, 0),
+                        width=7,
+                    )
+                    black_analysis.crop(
+                        diagnostics.body_window_box
+                    ).save(
+                        analysis_dir
+                        / f"region_{region_index:03d}_body_selected.png"
+                    )
+                body_overlay.save(
+                    analysis_dir
+                    / f"region_{region_index:03d}_body_windows.png"
+                )
+
             # 同时保存旧 20% 黑线候选，确保这一轮可以直接做逐像素对照。
             old_black_overlay = analysis.copy()
             old_black_draw = ImageDraw.Draw(old_black_overlay)
@@ -460,7 +511,13 @@ class TablePipeline:
             cleanup_overlay.save(
                 analysis_dir / f"region_{region_index:03d}_black_50_cleanup.png"
             )
-            white_cleanup = analysis.copy()
+            # 列白带通常画在20%图上；只有常规图无法形成可信列网格时，
+            # 诊断对象才来自50%图。可视化必须跟随真实坐标系，否则线会
+            # 被画到错误位置，反而妨碍人工判断。
+            white_cleanup_base = (
+                black_analysis if diagnostics.white_column_uses_black_scale else analysis
+            )
+            white_cleanup = white_cleanup_base.copy()
             white_cleanup_draw = ImageDraw.Draw(white_cleanup)
             for band in diagnostics.raw_white_column_bands:
                 white_cleanup_draw.rectangle(
@@ -468,14 +525,14 @@ class TablePipeline:
                         band.start,
                         0,
                         max(band.start, band.end - 1),
-                        analysis.height - 1,
+                        white_cleanup.height - 1,
                     ),
                     outline=(0, 80, 255),
                     width=1,
                 )
             for band in diagnostics.used_white_column_bands:
                 white_cleanup_draw.line(
-                    (band.position, 0, band.position, analysis.height),
+                    (band.position, 0, band.position, white_cleanup.height),
                     fill=(0, 180, 0),
                     width=2,
                 )
@@ -485,7 +542,7 @@ class TablePipeline:
                         item.band.position,
                         0,
                         item.band.position,
-                        analysis.height,
+                        white_cleanup.height,
                     ),
                     fill=(255, 0, 255),
                     width=3,
@@ -502,6 +559,30 @@ class TablePipeline:
                     "black_analysis_size": list(black_analysis.size),
                     "whitespace_analysis_path": str(analysis_path.resolve()),
                     "black_analysis_path": str(black_analysis_path.resolve()),
+                    "white_column_analysis_size": list(white_cleanup_base.size),
+                    "white_column_analysis_path": str(
+                        (black_analysis_path if diagnostics.white_column_uses_black_scale else analysis_path).resolve()
+                    ),
+                    "body_window_overlay_path": (
+                        str(
+                            (
+                                analysis_dir
+                                / f"region_{region_index:03d}_body_windows.png"
+                            ).resolve()
+                        )
+                        if diagnostics.body_window_results
+                        else None
+                    ),
+                    "body_selected_path": (
+                        str(
+                            (
+                                analysis_dir
+                                / f"region_{region_index:03d}_body_selected.png"
+                            ).resolve()
+                        )
+                        if diagnostics.body_window_box is not None
+                        else None
+                    ),
                     "source_region": region.to_dict(),
                     "grid": grid.to_dict(),
                 }

@@ -96,7 +96,7 @@ def slice_image(
 if __name__ == "__main__":
     # 使用示例
     slice_image(
-        image_path="raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images/97953b4d-67c3-49c7-922e-450b565dd401.jpg",   # 替换为你的图片路径
+        image_path="raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images/0e28acf1-b5e0-4925-808d-028affe0517a.jpg",   # 替换为你的图片路径
         output_dir="./sliced_chunks",
         chunk_height=2048,   # 根据你的GPU显存调整，一般2048~4096安全
         overlap=256,         # 重叠区域，避免文字在接缝处截断

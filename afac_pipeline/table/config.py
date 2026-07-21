@@ -23,9 +23,8 @@ class TableConfig:
     yolo_confidence: float = 0.25
     yolo_imgsz: int = 1280
     preview_max_side: int = 1800
-    # v6 固定使用原图 20% 做边界分析，再把分析图缩到 25%，即原图 5%，
-    # 生成用于分开同图异表的低清密度图。固定比例可避免同一套像素参数随
-    # 原图尺寸变化而漂移。
+    # 正式流程固定使用原图20%做横向分表和常规白带分析。分表只允许
+    # 上下切，不再产生左右分表；5%密度图仅保留为审计中间产物。
     table_analysis_scale: float = 0.20
     # 白带仍使用上面的 20% 分析图；只有容易被缩灰、缩断的黑表格线
     # 单独回到分表后的原图区域，以 50% 分辨率检测。
@@ -71,6 +70,11 @@ class TableConfig:
     # 物理线，此时不再让容易受邻近底色影响的灰度对比规则误杀。
     grid_black_column_contrast_bypass_ratio: float = 0.98
     grid_reliable_line_count: int = 5
+    # 有些表只在表头和分段处画横线，并不是每一行都有网格线。若稳定的
+    # 行白带数量远多于黑线，则把黑线视为局部分隔线，行结构改用白带。
+    grid_partial_line_min_white_bands: int = 12
+    grid_partial_line_white_band_multiplier: float = 3.0
+    grid_partial_line_min_white_regularity: float = 0.80
     # 黑线不能只靠“数量够多”就成为物理网格：至少要有一条边界处在表格
     # 中部，且任何一个逻辑格都不能独占所在方向绝大部分长度。
     grid_interior_margin_ratio: float = 0.10
@@ -87,9 +91,25 @@ class TableConfig:
     whitespace_column_min_regularity_gain: float = 0.08
     whitespace_column_min_retention_ratio: float = 0.25
     whitespace_column_min_width_separation_ratio: float = 1.60
+    # 行很多的无框表通常具有稳定的数据主体。只在行白带达到该数量时，
+    # 才允许去掉顶部/底部少量表头页脚后重新寻找列白带。
+    whitespace_column_body_min_row_bands: int = 20
+    whitespace_column_body_trim_ratio: float = 0.05
     whitespace_dilate_ratio: float = 0.004
     whitespace_horizontal_dilate_ratio: float | None = 0.0015
     whitespace_vertical_dilate_ratio: float | None = 0.004
+    # 表体滑动窗口：在50%分辨率图上寻找列结构稳定的主体区。
+    body_window_height_ratio: float = 0.18
+    body_window_step_ratio: float = 0.05
+    body_window_min_height: int = 120
+    body_window_min_count: int = 3
+    body_column_stable_max_width: int = 20
+    body_column_stable_repeat: int = 3
+    body_column_max_count_delta: int = 4
+    body_column_min_position_match: float = 0.80
+    body_column_position_tolerance_px: int = 8
+    body_column_dilate_min_ratio: float = 0.01
+    body_column_dilate_max_ratio: float = 0.03
     repeat_header_rows: int = 0
     repeat_stub_columns: int = 0
     # 空单元格也会输出 HTML 标签，因此按逻辑总格子数限制输出规模。
@@ -105,7 +125,11 @@ class TableConfig:
     projection_min_line_ratio: float = 0.22
     projection_min_lines: int = 3
     projection_max_line_gap_ratio: float = 0.10
-    pipeline_version: str = "table-v20-adaptive-white-column-width"
+    # 密度分表偶尔会把独立表题切成一个很浅的小区域。满足这两个比例时，
+    # 小区域会并回下一张表，由 top_context 链路识别标题。
+    density_title_strip_max_page_height_ratio: float = 0.05
+    density_title_strip_max_next_height_ratio: float = 0.10
+    pipeline_version: str = "table-v23-density-sliding-body-columns-r1"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -176,6 +200,12 @@ class TableConfig:
             )
         if self.grid_reliable_line_count < 1:
             raise ValueError("grid_reliable_line_count 至少为 1")
+        if self.grid_partial_line_min_white_bands < 3:
+            raise ValueError("局部分隔线复核至少需要3根行白带")
+        if self.grid_partial_line_white_band_multiplier <= 1:
+            raise ValueError("行白带相对黑线的数量倍数必须大于1")
+        if not 0 <= self.grid_partial_line_min_white_regularity <= 1:
+            raise ValueError("行白带最小稳定度必须位于 [0, 1] 内")
         if not 0 <= self.grid_interior_margin_ratio < 0.5:
             raise ValueError("网格内部边界留白比例必须位于 [0, 0.5) 内")
         if not 0 < self.grid_max_cell_span_ratio < 1:
@@ -194,6 +224,10 @@ class TableConfig:
             raise ValueError("列白带最小保留比例必须位于 (0, 1] 内")
         if self.whitespace_column_min_width_separation_ratio <= 1:
             raise ValueError("保留与删除白带宽度比必须大于1")
+        if self.whitespace_column_body_min_row_bands < 6:
+            raise ValueError("主体区列复核至少需要6根行白带")
+        if not 0 < self.whitespace_column_body_trim_ratio < 0.25:
+            raise ValueError("主体区首尾裁剪比例必须位于 (0, 0.25) 内")
         if (
             self.whitespace_horizontal_dilate_ratio is not None
             and self.whitespace_horizontal_dilate_ratio <= 0
@@ -204,6 +238,26 @@ class TableConfig:
             and self.whitespace_vertical_dilate_ratio <= 0
         ):
             raise ValueError("纵向文字扩张比例必须大于 0")
+        if not 0 < self.body_window_height_ratio <= 1:
+            raise ValueError("表体窗口高度比例必须位于 (0, 1] 内")
+        if not 0 < self.body_window_step_ratio <= 1:
+            raise ValueError("表体窗口步长比例必须位于 (0, 1] 内")
+        if self.body_window_min_height < 20:
+            raise ValueError("表体窗口最小高度不能小于20")
+        if self.body_window_min_count < 2:
+            raise ValueError("表体至少需要连续两个稳定窗口")
+        if not 1 <= self.body_column_stable_max_width <= 64:
+            raise ValueError("列白缝稳定扫描上限必须位于1和64之间")
+        if self.body_column_stable_repeat < 2:
+            raise ValueError("列白缝稳定重复次数至少为2")
+        if self.body_column_max_count_delta < 0:
+            raise ValueError("窗口列数允许差值不能为负数")
+        if not 0 < self.body_column_min_position_match <= 1:
+            raise ValueError("窗口列位置最小匹配比例必须位于 (0, 1] 内")
+        if self.body_column_position_tolerance_px < 0:
+            raise ValueError("窗口列位置容差不能为负数")
+        if not 0 < self.body_column_dilate_min_ratio <= self.body_column_dilate_max_ratio:
+            raise ValueError("表体列晕染比例范围不合法")
         if self.repeat_header_rows < 0 or self.repeat_stub_columns < 0:
             raise ValueError("重复表头行数和行名列数不能为负数")
         if self.max_logical_cells_per_tile < 32:
@@ -216,6 +270,10 @@ class TableConfig:
             raise ValueError("优选最小逻辑格数必须位于 1 和单块上限之间")
         if self.max_tile_aspect_ratio < 1:
             raise ValueError("逻辑切片最大宽高比不能小于 1")
+        if not 0 < self.density_title_strip_max_page_height_ratio < 0.25:
+            raise ValueError("标题条最大页面高度比例必须位于 (0, 0.25) 内")
+        if not 0 < self.density_title_strip_max_next_height_ratio < 0.5:
+            raise ValueError("标题条相对下表高度比例必须位于 (0, 0.5) 内")
 
     @classmethod
     def from_json(cls, path: str | Path | None) -> "TableConfig":

@@ -6,12 +6,51 @@ from PIL import Image, ImageDraw
 from afac_pipeline.common.models import Box
 from afac_pipeline.table.config import TableConfig
 from afac_pipeline.table.步骤005_黑线白带结构检测 import (
+    LineSegment,
+    _merge_shallow_title_regions,
+    _sparse_black_grid_centers,
     adaptive_line_segments,
     detect_v6_grid,
 )
+from afac_pipeline.table.步骤002_低密度分表 import find_density_bands
 
 
 class V6StructureTest(unittest.TestCase):
+    def test_single_pixel_razor_valleys_can_split_three_real_tables(self) -> None:
+        """5%图只剩1像素时，极深且两侧有内容的表间低谷仍应落刀。"""
+
+        density = np.full((200, 300), 0.16, dtype=np.float32)
+        density[:10] = 0
+        density[190:] = 0
+        density[55] = 0
+        density[125] = 0.001
+
+        horizontal, vertical = find_density_bands(density)
+
+        self.assertEqual(vertical, [])
+        self.assertEqual([band.center for band in horizontal], [55, 125])
+
+    def test_shallow_title_strip_is_merged_into_following_table(self) -> None:
+        split, analysis = _merge_shallow_title_regions(
+            [Box(0, 0, 600, 60), Box(0, 60, 600, 800)],
+            [Box(80, 20, 520, 35), Box(50, 80, 550, 700)],
+            (600, 800),
+            TableConfig(),
+        )
+
+        self.assertEqual(split, [Box(0, 0, 600, 800)])
+        self.assertEqual(analysis, [Box(50, 20, 550, 700)])
+
+    def test_real_small_table_is_not_mistaken_for_title_strip(self) -> None:
+        split, _ = _merge_shallow_title_regions(
+            [Box(0, 0, 600, 130), Box(0, 130, 600, 800)],
+            [Box(50, 20, 550, 110), Box(50, 150, 550, 700)],
+            (600, 800),
+            TableConfig(),
+        )
+
+        self.assertEqual(len(split), 2)
+
     def test_official_defaults_are_fixed_scale_v6_values(self) -> None:
         config = TableConfig()
         self.assertEqual(config.table_analysis_scale, 0.20)
@@ -133,6 +172,143 @@ class V6StructureTest(unittest.TestCase):
         self.assertGreaterEqual(len(diagnostics.black_columns), 5)
         self.assertEqual(diagnostics.black_rows_at_whitespace_scale, ())
         self.assertEqual(diagnostics.black_columns_at_whitespace_scale, ())
+
+    def test_partial_header_lines_use_rows_and_high_resolution_column_gaps(
+        self,
+    ) -> None:
+        """局部表头横线不能吞掉密集表的真实行列结构。"""
+
+        def draw_dense_table(
+            size: tuple[int, int],
+            *,
+            horizontal_lines: tuple[int, ...],
+            line_width: int,
+        ) -> Image.Image:
+            image = Image.new("RGB", size, "white")
+            draw = ImageDraw.Draw(image)
+            width, height = size
+            row_step = height / 32
+            column_step = width / 13
+            for row in range(30):
+                y1 = round((row + 1) * row_step)
+                y2 = max(y1, round((row + 1.45) * row_step))
+                for column in range(12):
+                    x1 = round((column + 0.25) * column_step)
+                    x2 = max(x1, round((column + 0.72) * column_step))
+                    draw.rectangle((x1, y1, x2, y2), fill="black")
+            for y in horizontal_lines:
+                draw.line((0, y, width - 1, y), fill="black", width=line_width)
+            return image
+
+        # 低分辨率图上的3根粗分隔带会堵住纵向白带；高分辨率图保留了
+        # 6根可擦除的细横线和真实列缝。这模拟185a超宽密集表。
+        white_analysis = draw_dense_table(
+            (240, 180),
+            horizontal_lines=(28, 82, 136),
+            line_width=4,
+        )
+        black_analysis = draw_dense_table(
+            (1200, 900),
+            horizontal_lines=(120, 126, 410, 416, 700, 706),
+            line_width=3,
+        )
+
+        grid, diagnostics = detect_v6_grid(
+            white_analysis,
+            Box(0, 0, 2400, 1800),
+            TableConfig(),
+            black_analysis_image=black_analysis,
+        )
+
+        self.assertTrue(grid.available, diagnostics.to_dict())
+        self.assertEqual(diagnostics.row_source, "white-band")
+        self.assertEqual(diagnostics.column_source, "white-band-50%-fallback")
+        self.assertTrue(diagnostics.white_column_uses_black_scale)
+        self.assertEqual((grid.row_count, grid.column_count), (31, 14))
+        self.assertIn("局部表头/分段线", diagnostics.row_reliability)
+        self.assertIn("改用50%图", diagnostics.white_column_cleanup)
+
+    def test_long_borderless_table_uses_body_rows_for_columns(self) -> None:
+        """长表表头会切碎列缝，主体区复核应恢复11列而不是几十列。"""
+
+        image = Image.new("RGB", (560, 860), "white")
+        draw = ImageDraw.Draw(image)
+        # 表头横跨所有列缝，模拟公司名、单位、险种名称等多行文字。
+        for x in range(5, 550, 17):
+            draw.rectangle((x, 4, x + 10, 34), fill="black")
+        # 70行、11列的主体。单元格文字不碰列缝，行距和列距都很稳定。
+        for row in range(70):
+            y = 45 + row * 11
+            for column in range(11):
+                x = 8 + column * 50
+                width = 24 + (row + column) % 8
+                draw.rectangle((x, y, x + width, y + 5), fill="black")
+
+        grid, diagnostics = detect_v6_grid(
+            image,
+            Box(0, 0, 5600, 8600),
+            TableConfig(),
+        )
+
+        self.assertTrue(grid.available, diagnostics.to_dict())
+        self.assertEqual(grid.column_count, 11)
+        self.assertIn("主体区", diagnostics.white_column_cleanup)
+
+    def test_two_column_table_combines_sparse_lines_and_row_gaps(self) -> None:
+        """少于5根的真实竖线也应支持两列表，且不能把数据区吞成一行。"""
+
+        image = Image.new("RGB", (100, 326), "white")
+        draw = ImageDraw.Draw(image)
+        # 左外框和中间分列线；右外框由分析框边界补齐。
+        for x in (4, 58):
+            draw.line((x, 0, x, 325), fill="black", width=2)
+        # 顶线、表头底线和底线，只能定义表头与整段数据，不能代表全部行。
+        for y in (4, 36, 321):
+            draw.line((0, y, 99, y), fill="black", width=2)
+        # 两行表头文字和18行数据，模拟8a150窄表。
+        for y in (10, 23):
+            draw.rectangle((65, y, 88, y + 5), fill="black")
+        for index in range(18):
+            y = 43 + index * 16
+            draw.rectangle((70, y, 82, y + 6), fill="black")
+
+        grid, diagnostics = detect_v6_grid(
+            image,
+            Box(0, 0, 500, 1630),
+            TableConfig(),
+        )
+
+        self.assertTrue(grid.available, diagnostics.to_dict())
+        self.assertEqual((grid.row_count, grid.column_count), (19, 2))
+        self.assertEqual(
+            diagnostics.row_source,
+            "hybrid-sparse-lines-white-bands",
+        )
+        self.assertEqual(
+            diagnostics.column_source,
+            "sparse-black-lines-0.95-contrast",
+        )
+        self.assertIn("擦除2根严格竖线", diagnostics.row_reliability)
+        self.assertIn("小列数表复核通过", diagnostics.column_reliability)
+
+    def test_sparse_lines_cannot_create_an_uncuttable_giant_column(self) -> None:
+        """少量局部竖线不能让超宽表退化成几个无法送模的巨列。"""
+
+        _, accepted, reason = _sparse_black_grid_centers(
+            [
+                LineSegment(10, 0, 600),
+                LineSegment(100, 0, 600),
+                LineSegment(850, 0, 600),
+            ],
+            length=1000,
+            minimum_cell_size=18,
+            maximum_span_ratio=0.95,
+            source_length=12000,
+            maximum_source_cell_size=3900,
+        )
+
+        self.assertFalse(accepted)
+        self.assertIn("超过切片上限3900px", reason)
 
 
 if __name__ == "__main__":
