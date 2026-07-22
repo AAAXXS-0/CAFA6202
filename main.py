@@ -39,11 +39,21 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--input-dir", required=True, type=Path)
     prepare.add_argument("--work-dir", default=Path("work/tables"), type=Path)
     prepare.add_argument("--config", type=Path)
+    prepare.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="单图预处理 fatal 时继续检查其他图片，并在清单中统一汇总",
+    )
 
     prepare_long = subparsers.add_parser("prepare-long", help="滑窗检测并按 H2/H3 语义准备长图")
     prepare_long.add_argument("--input-dir", required=True, type=Path)
     prepare_long.add_argument("--work-dir", default=Path("work/long"), type=Path)
     prepare_long.add_argument("--config", type=Path)
+    prepare_long.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="单图预处理 fatal 时继续检查其他图片，并在清单中统一汇总",
+    )
 
     run = subparsers.add_parser("run-tables", help="调用 FinixDoc-VL 并输出图表 CSV")
     run.add_argument("--manifest", required=True, type=Path)
@@ -226,13 +236,19 @@ def main() -> None:
 
     if args.command == "prepare-tables":
         pipeline = TablePipeline(TableConfig.from_json(args.config), args.work_dir)
-        manifest = pipeline.prepare_directory(args.input_dir)
+        manifest = pipeline.prepare_directory(
+            args.input_dir,
+            continue_on_error=args.continue_on_error,
+        )
         print(f"图表切分完成：{manifest}")
         return
 
     if args.command == "prepare-long":
         pipeline = LongPipeline(LongConfig.from_json(args.config), args.work_dir)
-        manifest = pipeline.prepare_directory(args.input_dir)
+        manifest = pipeline.prepare_directory(
+            args.input_dir,
+            continue_on_error=args.continue_on_error,
+        )
         print(f"长图二次切分完成：{manifest}")
         return
 

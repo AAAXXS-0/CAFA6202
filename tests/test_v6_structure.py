@@ -122,7 +122,7 @@ class V6StructureTest(unittest.TestCase):
 
         self.assertTrue(grid.available, diagnostics.to_dict())
         self.assertTrue(diagnostics.row_source.startswith("black-line"))
-        self.assertEqual(diagnostics.column_source, "white-band")
+        self.assertEqual(diagnostics.column_source, "white-band-50%-sliding-body")
         self.assertEqual(grid.row_boundaries[0], 2200)
         self.assertEqual(grid.row_boundaries[-1], 5960)
         self.assertEqual(grid.column_boundaries[0], 1000)
@@ -222,11 +222,12 @@ class V6StructureTest(unittest.TestCase):
 
         self.assertTrue(grid.available, diagnostics.to_dict())
         self.assertEqual(diagnostics.row_source, "white-band")
-        self.assertEqual(diagnostics.column_source, "white-band-50%-fallback")
+        self.assertEqual(diagnostics.column_source, "white-band-50%-sliding-body")
         self.assertTrue(diagnostics.white_column_uses_black_scale)
-        self.assertEqual((grid.row_count, grid.column_count), (31, 14))
+        # 样本实际画了12列；滑窗表体不能再被表头干扰多切成旧结果14列。
+        self.assertEqual((grid.row_count, grid.column_count), (31, 12))
         self.assertIn("局部表头/分段线", diagnostics.row_reliability)
-        self.assertIn("改用50%图", diagnostics.white_column_cleanup)
+        self.assertIn("采用50%统一分析图", diagnostics.white_column_cleanup)
 
     def test_long_borderless_table_uses_body_rows_for_columns(self) -> None:
         """长表表头会切碎列缝，主体区复核应恢复11列而不是几十列。"""
@@ -252,7 +253,7 @@ class V6StructureTest(unittest.TestCase):
 
         self.assertTrue(grid.available, diagnostics.to_dict())
         self.assertEqual(grid.column_count, 11)
-        self.assertIn("主体区", diagnostics.white_column_cleanup)
+        self.assertIn("表体窗口", diagnostics.white_column_cleanup)
 
     def test_two_column_table_combines_sparse_lines_and_row_gaps(self) -> None:
         """少于5根的真实竖线也应支持两列表，且不能把数据区吞成一行。"""
