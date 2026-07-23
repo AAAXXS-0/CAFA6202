@@ -208,42 +208,14 @@ def 分表后晕染分析框(
     if count > 1:
         areas = stats[1:, cv2.CC_STAT_AREA]
         main_label = int(np.argmax(areas)) + 1
-        main = stats[main_label]
-        main_area = int(main[cv2.CC_STAT_AREA])
-        mx1 = int(main[cv2.CC_STAT_LEFT])
-        my1 = int(main[cv2.CC_STAT_TOP])
-        mx2 = mx1 + int(main[cv2.CC_STAT_WIDTH])
-        my2 = my1 + int(main[cv2.CC_STAT_HEIGHT])
         selected_labels.append(main_label)
-        # 与主体横向明显重叠、且距离很近的小块一并保留。这样顶部表头不会
-        # 因尚未和正文完全连通而被直接丢掉，远处页眉页脚仍会被排除。
-        for label in range(1, count):
-            if label == main_label:
-                continue
-            item = stats[label]
-            area = int(item[cv2.CC_STAT_AREA])
-            x1 = int(item[cv2.CC_STAT_LEFT])
-            y1 = int(item[cv2.CC_STAT_TOP])
-            x2 = x1 + int(item[cv2.CC_STAT_WIDTH])
-            y2 = y1 + int(item[cv2.CC_STAT_HEIGHT])
-            overlap = max(0, min(mx2, x2) - max(mx1, x1))
-            overlap_ratio = overlap / max(1, min(mx2 - mx1, x2 - x1))
-            vertical_gap = max(0, max(my1, y1) - min(my2, y2))
-            if (
-                area >= max(8, round(main_area * 0.02))
-                and overlap_ratio >= 0.45
-                and vertical_gap <= crop.height * 0.06
-            ):
-                selected_labels.append(label)
-        for label in selected_labels:
-            component_view[labels == label] = 1
+        # 固定强晕染后，同一张表应已经连接成最大主体。其余小连通块不再
+        # 主动吸收，避免孤立标题、页眉页脚和噪点重新把分析框拉大。
+        component_view[labels == main_label] = 1
     if not component_view.any():
         component_view = connected.astype(np.uint8)
 
-    # 连通块仍用于观察“表体是否糊成一坨”，但最终分析框强制覆盖所有原始
-    # 墨迹。远处噪点最多让框稍大，不允许它反过来裁掉真实行线或边框。
-    protected_view = np.logical_or(component_view.astype(bool), ink)
-    ys, xs = np.nonzero(protected_view)
+    ys, xs = np.nonzero(component_view)
     if xs.size == 0 or ys.size == 0:
         box = Box(0, 0, crop.width, crop.height)
     else:
