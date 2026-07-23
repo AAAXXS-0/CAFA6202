@@ -54,6 +54,12 @@ from afac_pipeline.table.步骤005_黑线白带结构检测 import (
 默认配置 = 项目根目录 / "afac_pipeline/table/config.example.json"
 图片后缀 = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
+# 列白缝检测的二维晕染梯度。这里的数值都是相对于当前50%分析图宽高的
+# 比例，例如宽1000px时，0.015表示左右晕染内核约15px。
+列晕染左右最小比例 = 0.003
+列晕染左右最大比例 = 0.015
+列晕染上下稀疏上限 = 0.060
+
 
 @dataclass(frozen=True)
 class 轴候选:
@@ -258,11 +264,13 @@ def V7稀疏列晕染(
     )
     sparse = float(np.clip((0.08 - density) / 0.07, 0.0, 1.0))
     # 密集图保持原强度；越稀疏越接近6%，用于抹掉同一列文字内部的白缝。
-    ratio = old_ratio + (0.06 - old_ratio) * sparse
+    ratio = old_ratio + (列晕染上下稀疏上限 - old_ratio) * sparse
     vertical_kernel = max(3, round(height * ratio))
     # 旧V7这里的横向内核宽度为1，也就是完全没有左右晕染。现在让稀疏图
     # 逐步增加到表宽2%，用于抹掉同一段文字内部过于整齐的纵向白缝。
-    horizontal_ratio = 0.003 + (0.020 - 0.003) * sparse
+    horizontal_ratio = 列晕染左右最小比例 + (
+        列晕染左右最大比例 - 列晕染左右最小比例
+    ) * sparse
     horizontal_kernel = max(3, round(width * horizontal_ratio))
     mask = cv2.dilate(
         erased.astype(np.uint8),
