@@ -246,6 +246,63 @@ def dense_content_box(ink: np.ndarray, projection_ratio: float = 0.01) -> Box:
     )
 
 
+
+def smeared_content_box(
+    ink: np.ndarray,
+    config: TableConfig,
+) -> tuple[Box, np.ndarray, np.ndarray, dict[str, object]]:
+    """强二维晕染连接单张分表，只保留最大主体并取得保守分析框。"""
+
+    height, width = ink.shape
+    kernel_x = max(11, round(width * config.analysis_box_smear_horizontal_ratio))
+    kernel_y = max(7, round(height * config.analysis_box_smear_vertical_ratio))
+    smeared = cv2.dilate(
+        ink.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_x, kernel_y)),
+        iterations=1,
+    )
+    close_x = max(5, round(kernel_x * 0.75)) | 1
+    close_y = max(5, round(kernel_y * 0.75)) | 1
+    connected = cv2.morphologyEx(
+        smeared,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (close_x, close_y)),
+        iterations=config.analysis_box_close_iterations,
+    )
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        connected.astype(np.uint8),
+        connectivity=8,
+    )
+    main_component = np.zeros_like(connected, dtype=np.uint8)
+    selected_label: int | None = None
+    if count > 1:
+        selected_label = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        main_component[labels == selected_label] = 1
+    if not main_component.any():
+        main_component = connected.astype(np.uint8)
+
+    ys, xs = np.nonzero(main_component)
+    if xs.size == 0 or ys.size == 0:
+        box = Box(0, 0, width, height)
+    else:
+        padding = max(8, round(min(width, height) * config.analysis_box_padding_ratio))
+        box = Box(
+            max(0, int(xs.min()) - padding),
+            max(0, int(ys.min()) - padding),
+            min(width, int(xs.max()) + 1 + padding),
+            min(height, int(ys.max()) + 1 + padding),
+        )
+    info = {
+        "ink_density": float(ink.mean()),
+        "smear_kernel": [kernel_x, kernel_y],
+        "close_kernel": [close_x, close_y],
+        "close_iterations": config.analysis_box_close_iterations,
+        "component_count": max(0, count - 1),
+        "selected_component": selected_label,
+        "analysis_box": box.to_dict(),
+    }
+    return box, smeared.astype(bool), main_component.astype(bool), info
+
 def _merge_shallow_title_regions(
     split_boxes: list[Box],
     analysis_boxes: list[Box],
@@ -351,7 +408,7 @@ def detect_v6_regions(preview: Image.Image, config: TableConfig) -> V6RegionResu
             gray[split_box.y1 : split_box.y2, split_box.x1 : split_box.x2]
             < config.ink_threshold
         )
-        local = dense_content_box(local_ink)
+        local, _, _, _ = smeared_content_box(local_ink, config)
         analysis_boxes.append(
             Box(
                 split_box.x1 + local.x1,
@@ -489,6 +546,42 @@ def adaptive_line_segments(
         )
     return segments
 
+
+
+def _merge_nearby_positions(values: list[int], tolerance: int = 2) -> list[int]:
+    """把同一物理边界的黑线、白缝中心合并，避免制造1像素窄格。"""
+
+    ordered = sorted(set(int(value) for value in values))
+    if not ordered:
+        return []
+    groups: list[list[int]] = [[ordered[0]]]
+    for value in ordered[1:]:
+        if value - groups[-1][-1] <= tolerance:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return [round(sum(group) / len(group)) for group in groups]
+
+
+def _mixed_axis_centers(
+    black: list[int],
+    white: list[int],
+    length: int,
+    config: TableConfig,
+) -> tuple[list[int], bool, str]:
+    """少量黑分段线与完整白缝并用，并检查组合后是否仍形成合理网格。"""
+
+    centers = _merge_nearby_positions([*black, *white])
+    interior = [value for value in centers if 0 < value < length]
+    boundaries = tuple([0, *interior, length])
+    ok, reason = _boundaries_have_reasonable_cells(
+        boundaries,
+        config.grid_max_cell_span_ratio,
+    )
+    return interior, ok, (
+        f"{len(black)}根少量黑线与{len(white)}根白缝合并为"
+        f"{len(interior)}根内部边界；{reason}"
+    )
 
 def _position_spacing_regularity(positions: list[int]) -> float:
     """计算多数相邻位置是否遵循同一间距；允许少量宽格和合并格。"""
@@ -788,6 +881,40 @@ def _adaptive_white_rows(ink, config):
     ]
     return rows, dilate_ratio
 
+
+def build_row_smear_mask(
+    ink: np.ndarray,
+    black_columns: list[LineSegment],
+    config: TableConfig,
+) -> dict[str, object]:
+    """擦净竖黑线后做左右晕染，并返回完整行白缝诊断。"""
+
+    erased = _erase_perpendicular_lines(ink, black_columns, axis=1)
+    density = max(0.01, float(erased.mean()))
+    dilate_ratio = float(np.clip(
+        0.015 * 0.10 / density,
+        config.body_row_dilate_min_ratio,
+        config.body_row_dilate_max_ratio,
+    ))
+    kernel = max(3, round(ink.shape[1] * dilate_ratio))
+    mask = cv2.dilate(
+        erased.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, 1)),
+    ).astype(bool)
+    rows = [
+        round((start + end - 1) / 2)
+        for start, end in _runs(mask.mean(axis=1) <= config.whitespace_blank_ratio)
+        if end - start >= config.whitespace_min_band
+    ]
+    return {
+        "erased": erased,
+        "mask": mask,
+        "rows": rows,
+        "density": density,
+        "dilate_ratio": dilate_ratio,
+        "kernel": [kernel, 1],
+    }
+
 def _first_stable_column_bands(profile, config):
     """列白缝从1px向上寻找，第一次连续稳定就停止。"""
     raw=[WhiteColumnBand(a,b) for a,b in _runs(profile<=config.whitespace_blank_ratio)
@@ -824,33 +951,133 @@ def _choose_body_window_range(results,config):
     update(len(results),start)
     return best if best[1]-best[0]>=config.body_window_min_count else None
 
-def _select_sliding_body_columns(black_ink,black_rows,black_columns,config):
+def build_column_smear_mask(
+    ink: np.ndarray,
+    black_rows: list[LineSegment],
+    black_columns: list[LineSegment],
+    config: TableConfig,
+) -> dict[str, object]:
+    """擦净黑线后，对列白缝使用上下、左右二维自适应晕染。"""
+
+    height, width = ink.shape
+    erased = _erase_confirmed_grid_lines(ink, black_rows, black_columns)
+    density = max(0.002, float(erased.mean()))
+    base_vertical_ratio = float(np.clip(
+        0.01 * 0.15 / max(0.01, density),
+        config.body_column_dilate_min_ratio,
+        config.body_column_dilate_max_ratio,
+    ))
+    sparse_strength = float(np.clip((0.08 - density) / 0.07, 0.0, 1.0))
+    vertical_ratio = base_vertical_ratio + (
+        config.body_column_sparse_dilate_max_ratio - base_vertical_ratio
+    ) * sparse_strength
+    horizontal_ratio = config.body_column_horizontal_dilate_min_ratio + (
+        config.body_column_horizontal_dilate_max_ratio
+        - config.body_column_horizontal_dilate_min_ratio
+    ) * sparse_strength
+    vertical_kernel = max(3, round(height * vertical_ratio))
+    horizontal_kernel = max(3, round(width * horizontal_ratio))
+    mask = cv2.dilate(
+        erased.astype(np.uint8),
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (horizontal_kernel, vertical_kernel),
+        ),
+    ).astype(bool)
+    return {
+        "erased": erased,
+        "mask": mask,
+        "density": density,
+        "sparse_strength": sparse_strength,
+        "base_vertical_ratio": base_vertical_ratio,
+        "vertical_ratio": vertical_ratio,
+        "horizontal_ratio": horizontal_ratio,
+        "kernel": [horizontal_kernel, vertical_kernel],
+    }
+
+
+def _select_sliding_body_columns(black_ink, black_rows, black_columns, config):
     """在50%图中用列结构稳定性定位表体，再在整段表体上取列白缝。"""
-    height,width=black_ink.shape
-    erased=_erase_confirmed_grid_lines(black_ink,black_rows,black_columns)
-    density=max(0.01,float(erased.mean()))
-    dilate_ratio=float(np.clip(0.01*0.15/density,config.body_column_dilate_min_ratio,config.body_column_dilate_max_ratio))
-    kernel=max(3,round(height*dilate_ratio))
-    mask=cv2.dilate(erased.astype(np.uint8),cv2.getStructuringElement(cv2.MORPH_RECT,(1,kernel))).astype(bool)
-    window_height=min(height,max(config.body_window_min_height,round(height*config.body_window_height_ratio)))
-    step=max(20,round(height*config.body_window_step_ratio))
-    starts=list(range(0,max(1,height-window_height+1),step))
-    if starts and starts[-1]!=height-window_height: starts.append(height-window_height)
-    results=[]
+
+    height, width = black_ink.shape
+    smear = build_column_smear_mask(black_ink, black_rows, black_columns, config)
+    mask = smear["mask"]
+    window_height = min(
+        height,
+        max(config.body_window_min_height, round(height * config.body_window_height_ratio)),
+    )
+    step = max(20, round(height * config.body_window_step_ratio))
+    starts = list(range(0, max(1, height - window_height + 1), step))
+    if starts and starts[-1] != height - window_height:
+        starts.append(height - window_height)
+    results = []
     for start in starts:
-        end=start+window_height
-        raw,selected,threshold,counts=_first_stable_column_bands(mask[start:end].mean(axis=0),config)
-        results.append({"start":start,"end":end,"stable":threshold is not None,"threshold":threshold,"band_count":len(selected),"bands":[[b.start,b.end] for b in selected],"counts_until_stop":counts,"raw_band_count":len(raw)})
-    selected_range=_choose_body_window_range(results,config)
-    base={"selected":selected_range,"window_height":window_height,"step":step,"dilate_ratio":dilate_ratio,"mask":mask,"windows":results}
+        end = start + window_height
+        raw, selected, threshold, counts = _first_stable_column_bands(
+            mask[start:end].mean(axis=0),
+            config,
+        )
+        results.append({
+            "start": start,
+            "end": end,
+            "stable": threshold is not None,
+            "threshold": threshold,
+            "band_count": len(selected),
+            "bands": [[band.start, band.end] for band in selected],
+            "counts_until_stop": counts,
+            "raw_band_count": len(raw),
+        })
+    selected_range = _choose_body_window_range(results, config)
+    base = {
+        "selected": selected_range,
+        "window_height": window_height,
+        "step": step,
+        "dilate_ratio": smear["vertical_ratio"],
+        "horizontal_dilate_ratio": smear["horizontal_ratio"],
+        "dilate_kernel": smear["kernel"],
+        "density": smear["density"],
+        "sparse_strength": smear["sparse_strength"],
+        "mask": mask,
+        "windows": results,
+    }
     if selected_range is None:
-        return {**base,"body_box":None,"raw":[],"used":[],"threshold":None,"message":"没有连续稳定的表体窗口"}
-    y1=int(results[selected_range[0]]["start"])
-    y2=int(results[selected_range[1]-1]["end"])
-    raw,used,threshold,counts=_first_stable_column_bands(mask[y1:y2].mean(axis=0),config)
-    if threshold is None or len(used)<1:
-        return {**base,"body_box":(0,y1,width,y2),"raw":raw,"used":[],"threshold":threshold,"message":"选中的表体整体没有形成稳定列白缝"}
-    return {**base,"body_box":(0,y1,width,y2),"raw":raw,"used":used,"threshold":threshold,"counts_until_stop":counts,"message":f"表体窗口{selected_range[0]}～{selected_range[1]-1}，y={y1}:{y2}，列白缝首个稳定阈值{threshold}px，保留{len(used)}根"}
+        return {
+            **base,
+            "body_box": None,
+            "raw": [],
+            "used": [],
+            "threshold": None,
+            "message": "没有连续稳定的表体窗口",
+        }
+    y1 = int(results[selected_range[0]]["start"])
+    y2 = int(results[selected_range[1] - 1]["end"])
+    raw, used, threshold, counts = _first_stable_column_bands(
+        mask[y1:y2].mean(axis=0),
+        config,
+    )
+    if threshold is None or len(used) < 1:
+        return {
+            **base,
+            "body_box": (0, y1, width, y2),
+            "raw": raw,
+            "used": [],
+            "threshold": threshold,
+            "message": "选中的表体整体没有形成稳定列白缝",
+        }
+    return {
+        **base,
+        "body_box": (0, y1, width, y2),
+        "raw": raw,
+        "used": used,
+        "threshold": threshold,
+        "counts_until_stop": counts,
+        "message": (
+            f"表体窗口{selected_range[0]}～{selected_range[1] - 1}，y={y1}:{y2}，"
+            f"左右晕染{float(smear['horizontal_ratio']):.2%}、"
+            f"上下晕染{float(smear['vertical_ratio']):.2%}，"
+            f"列白缝首个稳定阈值{threshold}px，保留{len(used)}根"
+        ),
+    }
 
 def clean_suspicious_column_lines(
     lines: list[LineSegment], config: TableConfig
@@ -1189,33 +1416,18 @@ def detect_v6_grid(
         column_black_reason = (
             f"{column_black_reason}；小列数表复核通过：{sparse_column_reason}"
         )
-    white_row_has_black = _black_lines_are_distributed(
-        white_black_rows,
-        analysis_image.height,
-        reliable,
-        config.grid_interior_margin_ratio,
-    )[0]
-    white_column_has_black = _black_lines_are_distributed(
+    # “黑线能否独立构成完整网格”与“黑线会不会堵住白缝”是两回事。
+    # 哪怕只检测到一根可信竖线，后续左右晕染也会把它扩成很宽的黑带，
+    # 因此寻找行白缝前必须无条件擦除全部已检测竖黑线。
+    row_smear = build_row_smear_mask(
+        white_ink,
         white_black_columns,
-        analysis_image.width,
-        reliable,
-        config.grid_interior_margin_ratio,
-    )[0]
-
-    # 这是原有白带逻辑：找某方向白带前，只擦掉另一方向已确认的黑线。
-    ink_for_rows = (
-        _erase_perpendicular_lines(white_ink, white_black_columns, axis=1)
-        if white_column_has_black
-        else white_ink
+        config,
     )
-    ink_for_columns = (
-        _erase_perpendicular_lines(white_ink, white_black_rows, axis=0)
-        if white_row_has_black
-        else white_ink
-    )
-    white_rows, white_row_dilate_ratio = _adaptive_white_rows(
-        ink_for_rows, config
-    )
+    white_rows = list(row_smear["rows"])
+    white_row_dilate_ratio = float(row_smear["dilate_ratio"])
+    # 列白缝走50%滑窗表体链路；_select_sliding_body_columns 内部会在
+    # 上下晕染前无条件擦除已检测到的横、竖黑线。
     row_is_black, row_black_reason = _black_lines_are_distributed(
         black_rows,
         black_image.height,
@@ -1289,42 +1501,32 @@ def detect_v6_grid(
 
     row_uses_sparse_hybrid = False
     hybrid_row_centers: list[int] = []
-    if not row_is_black and white_black_columns and len(white_black_rows) >= 2:
-        current_row_boundaries = tuple(
-            dict.fromkeys([0, *white_rows, analysis_image.height])
+    # 少量横黑线通常只表示表头、分段线或外框。行白缝已经在擦净竖黑线后
+    # 完整检测，因此直接让稀疏横线固定大结构，再用白缝细分长数据区。
+    white_row_regularity = _position_spacing_regularity(white_rows)
+    if (
+        not row_is_black
+        and 2 <= len(white_black_rows) < reliable
+        and len(white_rows) >= 3
+        # 白缝本身已经高度规律时直接相信白缝；只有表头等区域制造了
+        # 明显不规则的小间隔，才让稀疏横线参与固定表头。
+        and white_row_regularity < 0.95
+    ):
+        hybrid_row_centers, hybrid_reason = _hybrid_sparse_row_centers(
+            white_black_rows,
+            white_rows,
         )
-        current_rows_ok = _boundaries_have_reasonable_cells(
-            current_row_boundaries,
+        hybrid_boundaries = tuple(hybrid_row_centers)
+        hybrid_ok = _boundaries_have_reasonable_cells(
+            hybrid_boundaries,
             config.grid_max_cell_span_ratio,
         )[0]
-        if not current_rows_ok:
-            # 少量严格竖线不足以单独证明完整列网格，却仍会堵住所有横向
-            # 白带。仅在当前行结构已经不可信时擦除它们，再让稀疏横线
-            # 固定表头/外框、白带细分中间的大数据区。
-            retry_row_ink = _erase_perpendicular_lines(
-                white_ink,
-                white_black_columns,
-                axis=1,
+        if hybrid_ok:
+            row_uses_sparse_hybrid = True
+            row_black_reason = (
+                f"{row_black_reason}；先擦除{len(white_black_columns)}根严格竖线"
+                f"取得完整行白缝，再组合稀疏横线：{hybrid_reason}"
             )
-            retry_white_rows, white_row_dilate_ratio = _adaptive_white_rows(
-                retry_row_ink, config
-            )
-            hybrid_row_centers, hybrid_reason = _hybrid_sparse_row_centers(
-                white_black_rows,
-                retry_white_rows,
-            )
-            hybrid_boundaries = tuple(hybrid_row_centers)
-            hybrid_ok = _boundaries_have_reasonable_cells(
-                hybrid_boundaries,
-                config.grid_max_cell_span_ratio,
-            )[0]
-            if hybrid_ok and len(hybrid_row_centers) > len(white_rows):
-                white_rows = retry_white_rows
-                row_uses_sparse_hybrid = True
-                row_black_reason = (
-                    f"{row_black_reason}；常规行白带不可信，擦除"
-                    f"{len(white_black_columns)}根严格竖线后：{hybrid_reason}"
-                )
 
     white_columns = [band.position for band in used_white_column_bands]
     white_column_preview_width = (
@@ -1333,15 +1535,61 @@ def detect_v6_grid(
         else analysis_image.width
     )
 
+    # 白缝本身完整且只有少量黑线时，黑线更像表头/分段硬边界。它们不应
+    # 迫使整个方向切换成纯黑线，但也不应被白缝分支丢掉。
+    row_uses_full_hybrid = False
+    full_hybrid_rows: list[int] = []
+    if (
+        not row_is_black
+        and not row_uses_sparse_hybrid
+        and 1 <= len(black_rows) <= 4
+        and white_rows
+    ):
+        full_hybrid_rows, mixed_ok, mixed_reason = _mixed_axis_centers(
+            [line.position for line in black_rows],
+            white_rows,
+            analysis_image.height,
+            config,
+        )
+        if mixed_ok:
+            row_uses_full_hybrid = True
+            row_black_reason = f"{row_black_reason}；{mixed_reason}"
+
+    column_uses_full_hybrid = False
+    full_hybrid_columns: list[int] = []
+    if (
+        not column_is_black
+        and not column_uses_sparse_black
+        and 1 <= len(black_columns) <= 4
+        and white_columns
+    ):
+        full_hybrid_columns, mixed_ok, mixed_reason = _mixed_axis_centers(
+            [line.position for line in black_columns],
+            white_columns,
+            white_column_preview_width,
+            config,
+        )
+        if mixed_ok:
+            column_uses_full_hybrid = True
+            column_black_reason = f"{column_black_reason}；{mixed_reason}"
+
     row_centers = (
         [line.position for line in black_rows]
         if row_is_black
-        else (hybrid_row_centers if row_uses_sparse_hybrid else white_rows)
+        else (
+            hybrid_row_centers
+            if row_uses_sparse_hybrid
+            else (full_hybrid_rows if row_uses_full_hybrid else white_rows)
+        )
     )
     column_centers = (
         [line.position for line in black_columns]
         if column_is_black
-        else (sparse_column_centers if column_uses_sparse_black else white_columns)
+        else (
+            sparse_column_centers
+            if column_uses_sparse_black
+            else (full_hybrid_columns if column_uses_full_hybrid else white_columns)
+        )
     )
     row_source = (
         f"black-line-{config.grid_black_line_ratio:.2f}"
@@ -1349,7 +1597,11 @@ def detect_v6_grid(
         else (
             "hybrid-sparse-lines-white-bands"
             if row_uses_sparse_hybrid
-            else "white-band"
+            else (
+                "hybrid-black-lines-white-bands"
+                if row_uses_full_hybrid
+                else "white-band"
+            )
         )
     )
     column_source = (
@@ -1359,9 +1611,13 @@ def detect_v6_grid(
             "sparse-black-lines-0.95-contrast"
             if column_uses_sparse_black
             else (
-                "white-band-50%-sliding-body"
-                if white_column_uses_black_scale
-                else "white-band"
+                "hybrid-black-lines-white-bands"
+                if column_uses_full_hybrid
+                else (
+                    "white-band-50%-sliding-body"
+                    if white_column_uses_black_scale
+                    else "white-band"
+                )
             )
         )
     )

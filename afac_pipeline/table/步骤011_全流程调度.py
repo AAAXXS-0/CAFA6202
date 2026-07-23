@@ -41,9 +41,12 @@ from .步骤001_墨水密度定位 import density_visualization
 from .步骤008_Markdown表格合并 import MarkdownMergeError, merge_markdown_grid
 from .步骤005_黑线白带结构检测 import (
     V6RegionResult,
+    build_column_smear_mask,
+    build_row_smear_mask,
     detect_v6_grid,
     detect_v6_regions,
     detected_boxes,
+    smeared_content_box,
 )
 from ..common.models import Box, DetectedBox, ImageMeta, PreparedRegion, TilePlan
 from ..common.submission import write_submission
@@ -305,6 +308,39 @@ class TablePipeline:
             )
         overlay.save(output_dir / "split_and_analysis_boxes.png")
 
+        # 正式测试阶段保留每张分表从原块到强晕染分析框的全部中间产物。
+        gray = np.asarray(preview.convert("L"), dtype=np.uint8)
+        for index, split_box in enumerate(result.split_boxes):
+            table_dir = output_dir / f"第{index + 1:03d}表_分析框"
+            table_dir.mkdir(parents=True, exist_ok=True)
+            crop = preview.crop((split_box.x1, split_box.y1, split_box.x2, split_box.y2))
+            crop.save(table_dir / "01_横向分表块.png")
+            local_ink = gray[
+                split_box.y1 : split_box.y2,
+                split_box.x1 : split_box.x2,
+            ] < self.config.ink_threshold
+            local_box, smeared, component, info = smeared_content_box(
+                local_ink,
+                self.config,
+            )
+            Image.fromarray(np.where(local_ink, 0, 255).astype(np.uint8)).save(
+                table_dir / "02_灰度二值图.png"
+            )
+            Image.fromarray(np.where(smeared, 0, 255).astype(np.uint8)).save(
+                table_dir / "03_强二维晕染.png"
+            )
+            Image.fromarray(np.where(component, 0, 255).astype(np.uint8)).save(
+                table_dir / "04_最大主体连通块.png"
+            )
+            local_overlay = crop.copy()
+            ImageDraw.Draw(local_overlay).rectangle(
+                (local_box.x1, local_box.y1, local_box.x2, local_box.y2),
+                outline=(0, 200, 60),
+                width=3,
+            )
+            local_overlay.save(table_dir / "05_最终分析框.png")
+            _json_dump(table_dir / "06_分析框判定数据.json", info)
+
     @staticmethod
     def _draw_preview_boxes(preview, boxes: list[DetectedBox], meta: ImageMeta):
         overlay = preview.copy()
@@ -372,6 +408,57 @@ class TablePipeline:
         draw.text((8, 8), grid.source, fill=color)
         overlay.save(analysis_dir / f"region_{region_index:03d}_boundaries.png")
         if diagnostics is not None:
+            # 行、列白缝均保存“擦黑线前后”和“晕染后”图，避免只看到
+            # 最终边界却无法判断白缝在哪一步消失。
+            ink50 = (
+                np.asarray(black_analysis.convert("L"), dtype=np.uint8)
+                < self.config.grid_white_threshold
+            )
+            Image.fromarray(np.where(ink50, 0, 255).astype(np.uint8)).save(
+                analysis_dir / f"region_{region_index:03d}_01_灰度二值图.png"
+            )
+            row_smear = build_row_smear_mask(
+                ink50,
+                list(diagnostics.black_columns_at_whitespace_scale),
+                self.config,
+            )
+            Image.fromarray(
+                np.where(row_smear["erased"], 0, 255).astype(np.uint8)
+            ).save(
+                analysis_dir / f"region_{region_index:03d}_02_行白缝_擦除竖黑线.png"
+            )
+            Image.fromarray(
+                np.where(row_smear["mask"], 0, 255).astype(np.uint8)
+            ).save(
+                analysis_dir / f"region_{region_index:03d}_03_行白缝_左右晕染.png"
+            )
+            column_smear = build_column_smear_mask(
+                ink50,
+                list(diagnostics.black_rows),
+                list(diagnostics.used_black_columns),
+                self.config,
+            )
+            Image.fromarray(
+                np.where(column_smear["erased"], 0, 255).astype(np.uint8)
+            ).save(
+                analysis_dir / f"region_{region_index:03d}_04_列白缝_擦除全部黑线.png"
+            )
+            Image.fromarray(
+                np.where(column_smear["mask"], 0, 255).astype(np.uint8)
+            ).save(
+                analysis_dir / f"region_{region_index:03d}_05_列白缝_二维自适应晕染.png"
+            )
+            smear_diagnostics = {
+                "行白缝": {
+                    key: value for key, value in row_smear.items()
+                    if key not in {"erased", "mask", "rows"}
+                }
+                | {"检测到的白缝数量": len(row_smear["rows"])},
+                "列白缝": {
+                    key: value for key, value in column_smear.items()
+                    if key not in {"erased", "mask"}
+                },
+            }
             # 表体滑窗中间图：红框是不稳定/未选窗口，绿框是最终连续表体段。
             if diagnostics.body_window_results:
                 body_overlay = black_analysis.copy()
@@ -550,6 +637,7 @@ class TablePipeline:
                     ),
                     "source_region": region.to_dict(),
                     "grid": grid.to_dict(),
+                    "smear_diagnostics": smear_diagnostics,
                 }
             )
             _json_dump(

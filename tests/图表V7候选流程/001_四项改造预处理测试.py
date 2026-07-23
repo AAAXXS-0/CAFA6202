@@ -34,8 +34,10 @@ from afac_pipeline.table import TableConfig
 from afac_pipeline.table.步骤005_黑线白带结构检测 import (
     LineSegment,
     WhiteColumnBand,
+    _black_lines_are_distributed,
     _choose_body_window_range,
     _erase_confirmed_grid_lines,
+    _erase_perpendicular_lines,
     _first_stable_column_bands,
     adaptive_line_segments,
     clean_suspicious_column_lines,
@@ -56,8 +58,8 @@ from afac_pipeline.table.步骤005_黑线白带结构检测 import (
 
 # 列白缝检测的二维晕染梯度。这里的数值都是相对于当前50%分析图宽高的
 # 比例，例如宽1000px时，0.015表示左右晕染内核约15px。
-列晕染左右最小比例 = 0.003
-列晕染左右最大比例 = 0.015
+列晕染左右最小比例 = 0.000
+列晕染左右最大比例 = 0.01
 列晕染上下稀疏上限 = 0.060
 
 
@@ -88,6 +90,113 @@ def 保存布尔图(path: Path, mask: np.ndarray) -> None:
 
     image = np.where(mask, 0, 255).astype(np.uint8)
     Image.fromarray(image, mode="L").save(path)
+
+
+def 连续真值区间(mask: np.ndarray) -> list[tuple[int, int]]:
+    """把一维布尔数组转换成左闭右开的连续区间。"""
+    changes = np.diff(np.pad(np.asarray(mask, dtype=np.int8), (1, 1)))
+    starts = np.flatnonzero(changes == 1)
+    ends = np.flatnonzero(changes == -1)
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
+def 保存行投影折线图(path: Path, before: np.ndarray, after: np.ndarray, threshold: float) -> None:
+    """灰线是晕染前，蓝线是晕染后，红线是白行阈值。"""
+    height, width, left = len(after), 1200, 80
+    usable = width - left - 20
+    display_max = max(0.20, float(np.quantile(after, 0.995)))
+    canvas = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(canvas)
+    threshold_x = left + round(min(1.0, threshold / display_max) * usable)
+    draw.line((threshold_x, 0, threshold_x, height), fill=(255, 0, 0), width=2)
+    def points(profile: np.ndarray) -> list[tuple[int, int]]:
+        return [(left + round(min(1.0, float(value) / display_max) * usable), y) for y, value in enumerate(profile)]
+    draw.line(points(before), fill=(150, 150, 150), width=1)
+    draw.line(points(after), fill=(0, 80, 255), width=1)
+    canvas.save(path)
+
+
+def 生成行白缝诊断(analysis: Image.Image, config: TableConfig, table_dir: Path, formal_white_rows: Iterable[int]) -> dict[str, object]:
+    """复现行白缝入口，保存每一步图像和逐行投影数据。"""
+    gray = np.asarray(analysis.convert("L"), dtype=np.uint8)
+    ink = gray < config.grid_white_threshold
+    envelope = content_envelope_mask(ink)
+    strict_columns = adaptive_line_segments(
+        ink, envelope, 1, config.grid_black_column_line_ratio,
+        grayscale=gray,
+        endpoint_trim_ratio=config.grid_black_column_endpoint_trim_ratio,
+        minimum_contrast=config.grid_black_column_min_contrast,
+    )
+    columns_reliable, columns_reason = _black_lines_are_distributed(
+        strict_columns, analysis.width, config.grid_reliable_line_count,
+        config.grid_interior_margin_ratio,
+    )
+    # 可靠性只决定竖黑线能否单独构成列网格；用于保护行白缝时，
+    # 哪怕只有一根已检测竖线，也必须在左右晕染前擦除。
+    before_smear = _erase_perpendicular_lines(ink, strict_columns, axis=1)
+    density = max(0.01, float(before_smear.mean()))
+    smear_ratio = float(np.clip(0.015 * 0.10 / density, config.body_row_dilate_min_ratio, config.body_row_dilate_max_ratio))
+    kernel_width = max(3, round(analysis.width * smear_ratio))
+    smeared = cv2.dilate(before_smear.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))).astype(bool)
+    before_profile = before_smear.mean(axis=1)
+    after_profile = smeared.mean(axis=1)
+    blank_flags = after_profile <= config.whitespace_blank_ratio
+    raw_runs = 连续真值区间(blank_flags)
+    accepted_runs = [(a, b) for a, b in raw_runs if b - a >= config.whitespace_min_band]
+    calculated = [round((a + b - 1) / 2) for a, b in accepted_runs]
+    formal = sorted(int(value) for value in formal_white_rows)
+
+    analysis.convert("L").save(table_dir / "023_行识别01_灰度图.png")
+    保存布尔图(table_dir / "024_行识别02_灰度二值图.png", ink)
+    column_overlay = analysis.convert("RGB").copy()
+    column_draw = ImageDraw.Draw(column_overlay)
+    for line in strict_columns:
+        column_draw.line((line.position, max(0, line.start), line.position, min(analysis.height, line.end)), fill=(255, 0, 0), width=2)
+    column_overlay.save(table_dir / "025_行识别03_擦除依据_严格竖黑线.png")
+    保存布尔图(table_dir / "026_行识别04_竖线处理后墨迹.png", before_smear)
+    保存布尔图(table_dir / "027_行识别05_左右晕染后墨迹.png", smeared)
+    保存布尔图(table_dir / "028_行识别06_满足空白阈值的原始白行.png", np.repeat(blank_flags[:, None], analysis.width, axis=1))
+
+    overlay = analysis.convert("RGB").copy()
+    draw = ImageDraw.Draw(overlay)
+    for a, b in raw_runs:
+        y = round((a + b - 1) / 2)
+        draw.line((0, y, analysis.width, y), fill=(255, 190, 0), width=max(1, b - a))
+    for value in calculated:
+        draw.line((0, value, analysis.width, value), fill=(0, 200, 60), width=2)
+    for value in formal:
+        draw.line((0, value, analysis.width, value), fill=(0, 80, 255), width=3)
+    overlay.save(table_dir / "029_行识别07_白缝候选_黄区绿线正式蓝线.png")
+    保存行投影折线图(table_dir / "030_行识别08_墨迹占比折线_灰前蓝后红阈值.png", before_profile, after_profile, config.whitespace_blank_ratio)
+
+    csv_lines = ["行号,晕染前墨迹占比,晕染后墨迹占比,是否满足空白阈值,所属连续白带"]
+    run_by_row = np.full(analysis.height, -1, dtype=np.int32)
+    for index, (a, b) in enumerate(raw_runs):
+        run_by_row[a:b] = index
+    for y in range(analysis.height):
+        csv_lines.append(f"{y},{before_profile[y]:.8f},{after_profile[y]:.8f},{int(blank_flags[y])},{int(run_by_row[y])}")
+    (table_dir / "031_行识别09_逐行投影数据.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8-sig")
+    report = {
+        "分析图尺寸": [analysis.width, analysis.height],
+        "灰度二值阈值": config.grid_white_threshold,
+        "空白行最大墨迹占比": config.whitespace_blank_ratio,
+        "空白带最小厚度": config.whitespace_min_band,
+        "严格竖黑线数量": len(strict_columns),
+        "严格竖黑线位置": [line.position for line in strict_columns],
+        "竖黑线是否足以独立构成列网格": columns_reliable,
+        "竖黑线网格可靠性说明": columns_reason,
+        "找行白缝前实际擦除的竖黑线数量": len(strict_columns),
+        "左右晕染比例": smear_ratio,
+        "左右晕染内核宽度": kernel_width,
+        "晕染前墨迹密度": density,
+        "原始白行连续区间": [[a, b, b - a] for a, b in raw_runs],
+        "通过最小厚度的白带": [[a, b, b - a, round((a + b - 1) / 2)] for a, b in accepted_runs],
+        "本诊断复算中心线": calculated,
+        "正式流程最终white_rows": formal,
+        "复算结果与正式结果一致": calculated == formal,
+    }
+    写JSON(table_dir / "032_行识别10_完整判定数据.json", report)
+    return report
 
 
 def 缩放图片(image: Image.Image, scale: float) -> Image.Image:
@@ -474,6 +583,12 @@ def 处理单图(image_path: Path, output_root: Path, config: TableConfig) -> di
             config,
             black_analysis_image=analysis,
         )
+        row_diagnostics = 生成行白缝诊断(
+            analysis,
+            config,
+            table_dir,
+            formal.white_rows,
+        )
         gray = np.asarray(analysis.convert("L"), dtype=np.uint8)
         ink50 = gray < config.grid_white_threshold
         envelope = content_envelope_mask(ink50)
@@ -574,6 +689,7 @@ def 处理单图(image_path: Path, output_root: Path, config: TableConfig) -> di
             "post_split_smear": box_info,
             "formal_grid": formal_grid.to_dict(),
             "formal_diagnostics": formal.to_dict(),
+            "row_whitespace_diagnostics": row_diagnostics,
             "v7_sparse_column_smear": {
                 key: value
                 for key, value in sparse_columns.items()

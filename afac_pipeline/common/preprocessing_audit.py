@@ -54,6 +54,11 @@ def _图表中文名(relative: Path) -> Path | None:
     if text in fixed:
         return Path(fixed[text])
 
+    match = re.fullmatch(r"density_detection/第(\d+)表_分析框/(.*)", text)
+    if match:
+        region = int(match.group(1))
+        return Path("分表分析框") / f"第{region:03d}表_{match.group(2)}"
+
     match = re.fullmatch(r"grid_analysis/region_(\d+)(.*)", text)
     if match:
         region = int(match.group(1)) + 1
@@ -68,6 +73,11 @@ def _图表中文名(relative: Path) -> Path | None:
             "_boundaries.png": "07_最终行列边界.png",
             "_diagnostics.json": "08_结构检测诊断.json",
             "_cell_ink_mask.json": "09_单元格墨迹矩阵.json",
+            "_01_灰度二值图.png": "10_灰度二值图.png",
+            "_02_行白缝_擦除竖黑线.png": "11_行白缝_擦除竖黑线.png",
+            "_03_行白缝_左右晕染.png": "12_行白缝_左右晕染.png",
+            "_04_列白缝_擦除全部黑线.png": "13_列白缝_擦除全部黑线.png",
+            "_05_列白缝_二维自适应晕染.png": "14_列白缝_二维自适应晕染.png",
         }
         label = labels.get(suffix)
         if label:

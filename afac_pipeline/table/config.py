@@ -37,6 +37,12 @@ class TableConfig:
     # 不再参与任何切块决策；新配置文件不必再填写。
     single_tile_min_scale: float = 0.65
     table_box_padding_ratio: float = 0.015
+    # 横向分表后，用固定强度二维晕染连接同一张表，只保留最大主体。
+    # 外接框宁可略带空白，也不能裁掉边缘稀疏数据。
+    analysis_box_smear_horizontal_ratio: float = 0.06
+    analysis_box_smear_vertical_ratio: float = 0.04
+    analysis_box_close_iterations: int = 2
+    analysis_box_padding_ratio: float = 0.03
     ink_coarse_max_side: int = 384
     ink_threshold: int = 225
     ink_minimum_density: float = 0.008
@@ -107,8 +113,13 @@ class TableConfig:
     body_column_max_count_delta: int = 4
     body_column_min_position_match: float = 0.80
     body_column_position_tolerance_px: int = 8
+    # 列白缝二维自适应晕染：上下负责连接同列文字，左右负责抹掉
+    # 中文、数字内部过于整齐的伪列缝。左右比例采用人工梯度确认后的0%～1%。
     body_column_dilate_min_ratio: float = 0.01
     body_column_dilate_max_ratio: float = 0.03
+    body_column_sparse_dilate_max_ratio: float = 0.06
+    body_column_horizontal_dilate_min_ratio: float = 0.0
+    body_column_horizontal_dilate_max_ratio: float = 0.01
     body_row_dilate_min_ratio: float = 0.015
     body_row_dilate_max_ratio: float = 0.04
     repeat_header_rows: int = 0
@@ -130,7 +141,7 @@ class TableConfig:
     # 小区域会并回下一张表，由 top_context 链路识别标题。
     density_title_strip_max_page_height_ratio: float = 0.05
     density_title_strip_max_next_height_ratio: float = 0.10
-    pipeline_version: str = "table-v24-unified50-adaptive-white-grid-r1"
+    pipeline_version: str = "table-v25-v7-formal-r1"
 
     def __post_init__(self) -> None:
         if self.backend not in {"auto", "pillow", "vips"}:
@@ -155,6 +166,14 @@ class TableConfig:
             raise ValueError("max_vlm_side 应位于 512 到 4096 之间")
         if not 0 <= self.tile_overlap < self.max_vlm_side:
             raise ValueError("tile_overlap 必须小于 max_vlm_side")
+        if not 0 < self.analysis_box_smear_horizontal_ratio <= 0.25:
+            raise ValueError("分析框左右晕染比例必须位于 (0, 0.25] 内")
+        if not 0 < self.analysis_box_smear_vertical_ratio <= 0.25:
+            raise ValueError("分析框上下晕染比例必须位于 (0, 0.25] 内")
+        if not 1 <= self.analysis_box_close_iterations <= 8:
+            raise ValueError("分析框闭运算次数必须位于1到8之间")
+        if not 0 <= self.analysis_box_padding_ratio <= 0.20:
+            raise ValueError("分析框外扩比例必须位于 [0, 0.20] 内")
         if not 64 <= self.ink_coarse_max_side <= 2048:
             raise ValueError("ink_coarse_max_side 应位于 64 到 2048 之间")
         if not 0 <= self.ink_threshold <= 255:
@@ -258,7 +277,20 @@ class TableConfig:
         if self.body_column_position_tolerance_px < 0:
             raise ValueError("窗口列位置容差不能为负数")
         if not 0 < self.body_column_dilate_min_ratio <= self.body_column_dilate_max_ratio:
-            raise ValueError("表体列晕染比例范围不合法")
+            raise ValueError("表体列上下晕染基础比例范围不合法")
+        if not (
+            self.body_column_dilate_max_ratio
+            <= self.body_column_sparse_dilate_max_ratio
+            <= 0.25
+        ):
+            raise ValueError("稀疏表列上下晕染上限必须不低于基础上限且不超过25%")
+        if not (
+            0
+            <= self.body_column_horizontal_dilate_min_ratio
+            <= self.body_column_horizontal_dilate_max_ratio
+            <= 0.10
+        ):
+            raise ValueError("表体列左右晕染比例必须满足 0≤最小值≤最大值≤10%")
         if not 0 < self.body_row_dilate_min_ratio <= self.body_row_dilate_max_ratio:
             raise ValueError("行白缝左右晕染比例范围不合法")
         if self.repeat_header_rows < 0 or self.repeat_stub_columns < 0:

@@ -13,6 +13,10 @@
   "max_vlm_side": 3900,
   "tile_overlap": 160,
   "table_box_padding_ratio": 0.015,
+  "analysis_box_smear_horizontal_ratio": 0.06,
+  "analysis_box_smear_vertical_ratio": 0.04,
+  "analysis_box_close_iterations": 2,
+  "analysis_box_padding_ratio": 0.03,
   "ink_coarse_max_side": 384,
   "ink_threshold": 225,
   "ink_minimum_density": 0.008,
@@ -63,6 +67,9 @@
   "body_column_position_tolerance_px": 8,
   "body_column_dilate_min_ratio": 0.01,
   "body_column_dilate_max_ratio": 0.03,
+  "body_column_sparse_dilate_max_ratio": 0.06,
+  "body_column_horizontal_dilate_min_ratio": 0.0,
+  "body_column_horizontal_dilate_max_ratio": 0.01,
   "body_row_dilate_min_ratio": 0.015,
   "body_row_dilate_max_ratio": 0.04,
   "repeat_header_rows": 0,
@@ -76,5 +83,5 @@
   "projection_max_line_gap_ratio": 0.10,
   "density_title_strip_max_page_height_ratio": 0.05,
   "density_title_strip_max_next_height_ratio": 0.10,
-  "pipeline_version": "table-v24-unified50-adaptive-white-grid-r1"
+  "pipeline_version": "table-v25-v7-formal-r1"
 }
