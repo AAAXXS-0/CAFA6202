@@ -108,11 +108,10 @@ def 合并近邻位置(values: Iterable[int], tolerance: int = 2) -> list[int]:
 
 
 def 中心转边界(centers: Iterable[int], length: int) -> tuple[int, ...]:
-    """实验版始终保留分析框两端，黑线只负责增加内部硬边界。"""
+    """保留分析框两端和所有检测线，不主动吞掉靠近外沿的真实线。"""
 
     values = 合并近邻位置(centers)
-    edge = max(3, round(length * 0.006))
-    interior = [value for value in values if edge < value < length - edge]
+    interior = [value for value in values if 0 < value < length]
     return tuple([0, *interior, length])
 
 
@@ -133,7 +132,9 @@ def 建立轴候选(name: str, centers: Iterable[int], length: int) -> 轴候选
     maximum_ratio = float(gaps.max() / max(1, length))
     minimum = int(gaps.min())
     stable = 间距稳定度(boundaries)
-    valid = minimum >= 2 and maximum_ratio <= 0.95
+    # 靠边线即使形成很窄的小格也先完整保留，由中间图交给人工判断；
+    # V7测试阶段不再为了“看起来规整”主动删除真实检测线。
+    valid = minimum >= 1 and maximum_ratio <= 0.95
     return 轴候选(
         name,
         tuple(合并近邻位置(centers)),
@@ -184,14 +185,14 @@ def 分表后晕染分析框(
     gray = np.asarray(crop.convert("L"), dtype=np.uint8)
     ink = gray < config.ink_threshold
     density = float(ink.mean())
-    # 稀疏表增加横向和纵向连接距离；这里只用于找外框，不参与内部划线。
-    sparse = float(np.clip((0.10 - density) / 0.09, 0.0, 1.0))
-    kernel_x = max(5, round(crop.width * (0.012 + 0.020 * sparse)))
-    kernel_y = max(3, round(crop.height * (0.004 + 0.012 * sparse)))
+    # 找分析框宁可多带空白，也不能漏掉真实墨迹。这里不再区分稀疏/密集，
+    # 固定使用很强的二维晕染，把同一张表尽可能连接成一整块。
+    kernel_x = max(11, round(crop.width * 0.06))
+    kernel_y = max(7, round(crop.height * 0.04))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_x, kernel_y))
     smeared = cv2.dilate(ink.astype(np.uint8), kernel, iterations=1)
-    close_x = max(3, round(kernel_x * 0.65)) | 1
-    close_y = max(3, round(kernel_y * 0.65)) | 1
+    close_x = max(5, round(kernel_x * 0.75)) | 1
+    close_y = max(5, round(kernel_y * 0.75)) | 1
     connected = cv2.morphologyEx(
         smeared,
         cv2.MORPH_CLOSE,
@@ -239,11 +240,14 @@ def 分表后晕染分析框(
     if not component_view.any():
         component_view = connected.astype(np.uint8)
 
-    ys, xs = np.nonzero(component_view)
+    # 连通块仍用于观察“表体是否糊成一坨”，但最终分析框强制覆盖所有原始
+    # 墨迹。远处噪点最多让框稍大，不允许它反过来裁掉真实行线或边框。
+    protected_view = np.logical_or(component_view.astype(bool), ink)
+    ys, xs = np.nonzero(protected_view)
     if xs.size == 0 or ys.size == 0:
         box = Box(0, 0, crop.width, crop.height)
     else:
-        padding = max(4, round(min(crop.size) * 0.012))
+        padding = max(8, round(min(crop.size) * 0.03))
         box = Box(
             max(0, int(xs.min()) - padding),
             max(0, int(ys.min()) - padding),
@@ -252,7 +256,7 @@ def 分表后晕染分析框(
         )
     info = {
         "ink_density": density,
-        "sparse_strength": sparse,
+        "adaptive_smear": False,
         "smear_kernel": [kernel_x, kernel_y],
         "close_kernel": [close_x, close_y],
         "component_count": max(0, count - 1),
@@ -283,10 +287,17 @@ def V7稀疏列晕染(
     sparse = float(np.clip((0.08 - density) / 0.07, 0.0, 1.0))
     # 密集图保持原强度；越稀疏越接近6%，用于抹掉同一列文字内部的白缝。
     ratio = old_ratio + (0.06 - old_ratio) * sparse
-    kernel = max(3, round(height * ratio))
+    vertical_kernel = max(3, round(height * ratio))
+    # 旧V7这里的横向内核宽度为1，也就是完全没有左右晕染。现在让稀疏图
+    # 逐步增加到表宽2%，用于抹掉同一段文字内部过于整齐的纵向白缝。
+    horizontal_ratio = 0.003 + (0.020 - 0.003) * sparse
+    horizontal_kernel = max(3, round(width * horizontal_ratio))
     mask = cv2.dilate(
         erased.astype(np.uint8),
-        cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel)),
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (horizontal_kernel, vertical_kernel),
+        ),
     ).astype(bool)
     window_height = min(
         height,
@@ -322,7 +333,8 @@ def V7稀疏列晕染(
             "erased": erased,
             "old_ratio": old_ratio,
             "dilate_ratio": ratio,
-            "kernel": kernel,
+            "kernel": [horizontal_kernel, vertical_kernel],
+            "horizontal_dilate_ratio": horizontal_ratio,
             "density": density,
             "sparse_strength": sparse,
             "windows": windows,
@@ -344,7 +356,8 @@ def V7稀疏列晕染(
         "erased": erased,
         "old_ratio": old_ratio,
         "dilate_ratio": ratio,
-        "kernel": kernel,
+        "kernel": [horizontal_kernel, vertical_kernel],
+        "horizontal_dilate_ratio": horizontal_ratio,
         "density": density,
         "sparse_strength": sparse,
         "windows": windows,
@@ -356,7 +369,8 @@ def V7稀疏列晕染(
         "counts_until_stop": counts,
         "message": (
             f"V7表体窗口{selected_range[0]}～{selected_range[1] - 1}，"
-            f"y={y1}:{y2}，晕染{ratio:.2%}，稳定阈值{threshold}px，"
+            f"y={y1}:{y2}，左右晕染{horizontal_ratio:.2%}、"
+            f"上下晕染{ratio:.2%}，稳定阈值{threshold}px，"
             f"保留{len(used)}根列白缝"
         ),
     }
