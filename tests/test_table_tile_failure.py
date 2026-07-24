@@ -69,6 +69,27 @@ class TableTileFailureTest(unittest.TestCase):
         )
         return manifest_path
 
+    def test_forced_completion_keeps_grid_and_blanks_only_failed_tile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = TablePipeline(TableConfig(backend="pillow"), root / "work")
+            manifest = self._manifest(root)
+            result = pipeline._recognize_manifest(
+                manifest,
+                TileFailureClient(fail_first=True),
+                allow_degraded_output=True,
+            )
+            report = json.loads(
+                (manifest.parent / "recognition_failures.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(report["status"], "degraded")
+            self.assertEqual(report["failure_count"], 0)
+            self.assertEqual(report["degraded_count"], 1)
+            self.assertEqual(result.count("<tr>"), 2)
+            self.assertIn("<td>A</td>", result)
+
     def test_failed_tile_does_not_stop_following_tile_and_retries_only_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

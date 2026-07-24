@@ -41,18 +41,23 @@
 - 切块计划要求缩放、实际裁片尺寸与计划不一致，或表头/行名上下文拼接尺寸不一致。
 - 墨迹矩阵、切块、审计图或manifest生成失败。
 
-## ④ 任意图片识别结束后仍不完整
+## ④ 识别失败与强制完成
 
-识别阶段会继续处理其他图片并保存成功缓存，但只要一个原图最终不完整，所属分支就只写 `partial_results.csv`，一键脚本不会合并正式CSV。
+三个一键入口默认开启强制完成，因此 API、FireRed 或 Paddle 在重试耗尽后，
+一般不会再阻止最终 CSV：
 
-- API鉴权、网络、超时、服务器过载等问题在最多15次退让后仍失败。
-- FireRed/Paddle推理报错、显存溢出、进程空转超时或模型返回明确失败。
-- 某个非空切块连续返回不可解析内容：没有HTML/Markdown表格、HTML损坏、合并单元格冲突，或质量检查始终不通过。
-- 一张图中任意切块失败；程序会继续该图其他切块及其他图片，但该原图不会写整图成功缓存。
-- 切块都成功，但区域合并仍无法可靠完成，例如缺少切块响应、模型矩阵无法软映射、切块间内容冲突导致合并异常。
-- 读取旧缓存、写SQLite、写Markdown或写分支CSV时发生异常。
+- 图表单块失败：按该块预处理 R×C 生成全空 HTML，其他成功块原样保留；
+- 图表区域最终无法合并：按完整区域 R×C 生成全空 HTML；
+- 长图或图表发生无法局部恢复的整图异常：该图片 `ground_truth` 用空字符串占位；
+- 所有降级均写入 `recognition_failures.json`，状态为 `degraded`，不会伪装成正常识别；
+- 强制结果使用独立缓存摘要，避免与严格模式的整图成功缓存混用。
 
-以下情况本身不会阻止最终CSV：顶部候选标题识别失败只记warning；预处理确认的空块直接生成同形状空表；模型正常返回全空并复核3次后也生成同形状空表；模型行列数与预处理不同但软对齐成功时只记warning。
+底层 `main.py run-tables/run-long` 默认仍是严格模式。只有传入
+`--allow-degraded-output` 才启用上述降级；严格模式中，任一非空损坏响应、
+纯文字表格、HTML 截断、矩阵冲突或请求耗尽仍会只生成 `partial_results.csv`。
+
+识别阶段仍可能因进程被杀、磁盘写入失败、SQLite损坏、Python崩溃等系统级
+错误而无法走到最终合并；这些不是模型内容降级能够掩盖的问题。
 
 ## ⑤ 分支CSV或最终合并校验失败
 
@@ -68,8 +73,8 @@
 
 只有日志出现“全部完成”，并且对应入口的最终文件存在，才算完成：
 
-- 官方API：`outputs/最终提交/finix_ab_A_submit.csv`
-- FireRed：`outputs/FireRed最终提交/finix_ab_A_submit.csv`
-- PaddleOCR-VL：`outputs/本地模型最终提交/finix_ab_A_submit.csv`
+- 官方API：`outputs/最终提交/finix_ab_B_submit.csv`
+- FireRed：`outputs/FireRed最终提交/finix_ab_B_submit.csv`
+- PaddleOCR-VL：`outputs/本地模型最终提交/finix_ab_B_submit.csv`
 
-看到 `partial_results.csv`、`部分结果.csv`、`预处理致命错误.json` 或 `recognition_failures.json`，都说明当前仍不能生成正式提交文件。
+`recognition_failures.json` 的 `status=degraded` 表示最终 CSV 已生成但包含降级占位；只有预处理 fatal、部分结果模式或系统级异常才会阻止正式提交文件。

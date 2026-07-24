@@ -113,10 +113,17 @@ def _is_truncated_empty_html(response: str) -> bool:
         return False
     if not re.search(r"</t[dh]\s*>", response, re.IGNORECASE):
         return False
+    normalized = re.sub(
+        r"^```(?:markdown|html)?\s*",
+        "",
+        response.strip(),
+        count=1,
+        flags=re.IGNORECASE,
+    )
     remainder = re.sub(
         r"</?(?:table|tr|td|th)\b[^>]*>",
         "",
-        response,
+        normalized,
         flags=re.IGNORECASE,
     )
     # API 的 token 截断通常停在“<td”或“</tr”中间，只允许末尾这一段残标签。
@@ -1610,12 +1617,19 @@ class TablePipeline:
         )
         return text
 
-    def _recognize_manifest(self, manifest_path: Path, client: FinixDocClient) -> str:
+    def _recognize_manifest(
+        self,
+        manifest_path: Path,
+        client: FinixDocClient,
+        *,
+        allow_degraded_output: bool = False,
+    ) -> str:
         image_manifest = _load_json(manifest_path)
         image_info = image_manifest["image"]
         image_name = str(image_info.get("file_name") or Path(image_info["path"]).name)
         region_markdowns: list[str] = []
         tile_failures: list[dict[str, Any]] = []
+        degraded_parts: list[dict[str, Any]] = []
         cache_model = _table_cache_model(client)
         total_tiles = sum(len(region["tiles"]) for region in image_manifest["regions"])
         completed_tiles = 0
@@ -1712,6 +1726,7 @@ class TablePipeline:
                 else:
                     markdown: str | None = None
                     quality_report: dict[str, object] | None = None
+                    forced_degradation = False
                     cached_entry = self.cache.get_tile_entry(cache_key)
                     cached = cached_entry[0] if cached_entry else None
                     cached_metadata = cached_entry[1] if cached_entry else {}
@@ -1738,6 +1753,11 @@ class TablePipeline:
                                     not in {
                                         "empty-fallback",
                                         "preprocess-confirmed-empty",
+                                        *(
+                                            ("error-fallback",)
+                                            if allow_degraded_output
+                                            else ()
+                                        ),
                                     }
                                 ):
                                     raise HtmlTableMergeError(
@@ -1783,6 +1803,11 @@ class TablePipeline:
                                         not in {
                                             "empty-fallback",
                                             "preprocess-confirmed-empty",
+                                            *(
+                                                ("error-fallback",)
+                                                if allow_degraded_output
+                                                else ()
+                                            ),
                                         }
                                     ):
                                         continue
@@ -2009,23 +2034,53 @@ class TablePipeline:
                                 "error_type": type(error).__name__,
                                 "error": str(error),
                             }
-                            tile_failures.append(failure)
-                            completed_tiles += 1
-                            print(
-                                f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
-                                f"{request_label}：{error}；不缓存损坏响应，"
-                                "继续此图下一块。",
-                                flush=True,
-                            )
-                            continue
+                            if allow_degraded_output and tile.tiling_mode == "logical_grid":
+                                markdown = _empty_tile_html(tile)
+                                forced_degradation = True
+                                source = "识别失败，按预处理物理结构补空表"
+                                rows, columns = _logical_tile_shape(tile)
+                                quality_report = {
+                                    "physical_rows": rows,
+                                    "physical_columns": columns,
+                                    "warnings": [
+                                        "识别重试耗尽；该切块内容已降级为空，物理结构保留"
+                                    ],
+                                }
+                                failure["fallback"] = "按预处理 R×C 生成全空切块"
+                                failure["degraded_output"] = True
+                                degraded_parts.append(failure)
+                                print(
+                                    f"[图表强制补全 {completed_tiles + 1:02d}/{total_tiles:02d}] "
+                                    f"{request_label}：{error}；保留 R×C 并清空该块内容。",
+                                    flush=True,
+                                )
+                            else:
+                                tile_failures.append(failure)
+                                completed_tiles += 1
+                                print(
+                                    f"[图表切块失败 {completed_tiles:02d}/{total_tiles:02d}] "
+                                    f"{request_label}：{error}；不缓存损坏响应，"
+                                    "继续此图下一块。",
+                                    flush=True,
+                                )
+                                continue
 
                         metadata = {
                             **base_metadata,
                             "response_status": (
-                                "empty-fallback" if empty_reason else "valid"
+                                "error-fallback"
+                                if forced_degradation
+                                else ("empty-fallback" if empty_reason else "valid")
                             ),
                             "quality": quality_report,
                         }
+                        if forced_degradation:
+                            metadata.update(
+                                {
+                                    "degraded_output": True,
+                                    "degraded_reason": degraded_parts[-1]["error"],
+                                }
+                            )
                         if empty_reason is not None:
                             metadata.update(
                                 {
@@ -2129,22 +2184,36 @@ class TablePipeline:
                         },
                     },
                 )
-                tile_failures.append(
-                    {
-                        "source_image": image_name,
-                        "region_index": region["index"],
-                        "tile_file_name": "<区域合并>",
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    }
-                )
-                print(
-                    f"[图表区域损坏] 原图 {image_name} / "
-                    f"区域 {region['index'] + 1} 无法可靠合并："
-                    f"{error}；禁止把损坏响应拼入最终结果，继续下一区域。",
-                    flush=True,
-                )
-                continue
+                merge_failure = {
+                    "source_image": image_name,
+                    "region_index": region["index"],
+                    "tile_file_name": "<区域合并>",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                if allow_degraded_output and row_boundaries and column_boundaries:
+                    region_markdown = render_empty_table(
+                        len(row_boundaries) - 1,
+                        len(column_boundaries) - 1,
+                    )
+                    merge_failure["fallback"] = "按区域完整 R×C 生成全空表"
+                    merge_failure["degraded_output"] = True
+                    degraded_parts.append(merge_failure)
+                    print(
+                        f"[图表区域强制补全] 原图 {image_name} / "
+                        f"区域 {region['index'] + 1}：{error}；"
+                        "保留整区物理结构并清空内容。",
+                        flush=True,
+                    )
+                else:
+                    tile_failures.append(merge_failure)
+                    print(
+                        f"[图表区域损坏] 原图 {image_name} / "
+                        f"区域 {region['index'] + 1} 无法可靠合并："
+                        f"{error}；禁止把损坏响应拼入最终结果，继续下一区域。",
+                        flush=True,
+                    )
+                    continue
             region_text = region_markdown.strip()
             if top_context_markdown:
                 region_text = f"{top_context_markdown.strip()}\n\n{region_text}"
@@ -2153,10 +2222,16 @@ class TablePipeline:
         _json_dump(
             part_failure_path,
             {
-                "status": "incomplete" if tile_failures else "ok",
+                "status": (
+                    "incomplete"
+                    if tile_failures
+                    else ("degraded" if degraded_parts else "ok")
+                ),
                 "source_image": image_name,
                 "failure_count": len(tile_failures),
                 "failed_parts": tile_failures,
+                "degraded_count": len(degraded_parts),
+                "degraded_parts": degraded_parts,
             },
         )
         if tile_failures:
@@ -2174,6 +2249,7 @@ class TablePipeline:
         client: FinixDocClient,
         output_csv: str | Path,
         max_workers: int = 1,
+        allow_degraded_output: bool = False,
     ) -> dict[str, str]:
         dataset_manifest = _load_json(Path(dataset_manifest_path))
         cache_model = _table_cache_model(client)
@@ -2184,6 +2260,8 @@ class TablePipeline:
                 + cache_model
                 + "\0"
                 + PROMPT_VERSION
+                + "\0degraded="
+                + str(allow_degraded_output)
             ).encode("utf-8")
         ).hexdigest()
 
@@ -2203,7 +2281,15 @@ class TablePipeline:
             cached = self.cache.get_image(item["sha256"], recognition_digest)
             if cached is None:
                 image_manifest_path = Path(item["image_manifest"])
-                cached = self._recognize_manifest(image_manifest_path, client)
+                cached = (
+                    self._recognize_manifest(
+                        image_manifest_path,
+                        client,
+                        allow_degraded_output=True,
+                    )
+                    if allow_degraded_output
+                    else self._recognize_manifest(image_manifest_path, client)
+                )
                 title_warnings = list(
                     (image_manifest_path.parent / "quality").glob(
                         "top_context_region_*_warning.json"
@@ -2247,6 +2333,28 @@ class TablePipeline:
                 }
                 if isinstance(error, IncompleteImageRecognitionError):
                     failure["failed_parts"] = error.failed_parts
+                if allow_degraded_output:
+                    fallback = ""
+                    failure["degraded_output"] = True
+                    failure["fallback"] = "整图异常，提交结果降级为空字符串"
+                    self.cache.put_image(
+                        item["sha256"],
+                        recognition_digest,
+                        fallback,
+                        {
+                            "canonical_file_name": canonical_name,
+                            "model": cache_model,
+                            "prompt_version": PROMPT_VERSION,
+                            "degraded_output": True,
+                            "degraded_reason": str(error),
+                        },
+                    )
+                    print(
+                        f"[图表整图强制补全] 原图 {canonical_name}：{error}；"
+                        "结果降级为空字符串，继续生成完整 CSV。",
+                        flush=True,
+                    )
+                    return canonical_name, fallback, failure
                 print(
                     f"[图表失败] 原图 {canonical_name}：{error}；"
                     "未写整图缓存，继续处理其他图片。",
@@ -2270,6 +2378,34 @@ class TablePipeline:
             name: markdown for name, markdown, _ in outcomes if markdown is not None
         }
         failures = [failure for _, _, failure in outcomes if failure is not None]
+        degraded_images: list[dict[str, Any]] = []
+        for item in canonical_items:
+            report_path = (
+                Path(item["image_manifest"]).parent / "recognition_failures.json"
+            )
+            try:
+                report = _load_json(report_path)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if report.get("status") == "degraded":
+                degraded_images.append(
+                    {
+                        "canonical_file_name": item["canonical_file_name"],
+                        "report_path": str(report_path.resolve()),
+                        "degraded_count": int(report.get("degraded_count", 0)),
+                        "degraded_parts": report.get("degraded_parts", []),
+                    }
+                )
+        for failure in failures:
+            if failure.get("degraded_output"):
+                degraded_images.append(
+                    {
+                        "canonical_file_name": failure["canonical_file_name"],
+                        "report_path": failure.get("image_manifest"),
+                        "degraded_count": 1,
+                        "degraded_parts": [failure],
+                    }
+                )
 
         results = {
             item["file_name"]: canonical_results[item["canonical_file_name"]]
@@ -2286,14 +2422,21 @@ class TablePipeline:
         _json_dump(
             failure_report_path,
             {
-                "status": "incomplete" if failures else "ok",
+                "status": (
+                    "degraded"
+                    if degraded_images or (failures and allow_degraded_output)
+                    else ("incomplete" if failures else "ok")
+                ),
+                "allow_degraded_output": allow_degraded_output,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "failure_count": len(failures),
+                "degraded_image_count": len(degraded_images),
                 "successful_unique_images": len(canonical_results),
                 "failures": failures,
+                "degraded_images": degraded_images,
             },
         )
-        if failures:
+        if failures and not allow_degraded_output:
             partial_csv = self.work_dir / "partial_results.csv"
             write_submission(results, partial_csv)
             failed_names = ", ".join(

@@ -554,6 +554,7 @@ class LongPipeline:
         client: FinixDocClient,
         output_csv: str | Path,
         max_workers: int = 1,
+        allow_degraded_output: bool = False,
     ) -> dict[str, str]:
         dataset_manifest = _load_json(Path(dataset_manifest_path))
         recognition_digest = hashlib.sha256(
@@ -563,6 +564,8 @@ class LongPipeline:
                 + client.model
                 + "\0"
                 + LONG_PROMPT_VERSION
+                + "\0degraded="
+                + str(allow_degraded_output)
             ).encode("utf-8")
         ).hexdigest()
         if max_workers <= 0:
@@ -614,6 +617,28 @@ class LongPipeline:
                 }
                 if isinstance(error, IncompleteImageRecognitionError):
                     failure["failed_parts"] = error.failed_parts
+                if allow_degraded_output:
+                    fallback = ""
+                    failure["degraded_output"] = True
+                    failure["fallback"] = "整图异常，提交结果降级为空字符串"
+                    self.cache.put_image(
+                        item["sha256"],
+                        recognition_digest,
+                        fallback,
+                        {
+                            "canonical_file_name": canonical_name,
+                            "model": client.model,
+                            "prompt_version": LONG_PROMPT_VERSION,
+                            "degraded_output": True,
+                            "degraded_reason": str(error),
+                        },
+                    )
+                    print(
+                        f"[长图强制补全] 原图 {canonical_name}：{error}；"
+                        "结果降级为空字符串，继续生成完整 CSV。",
+                        flush=True,
+                    )
+                    return canonical_name, fallback, failure
                 print(
                     f"[长图失败] 原图 {canonical_name}：{error}；"
                     "未写整图缓存，继续处理其他图片。",
@@ -657,14 +682,19 @@ class LongPipeline:
         _dump_json(
             failure_report_path,
             {
-                "status": "incomplete" if failures else "ok",
+                "status": (
+                    "degraded"
+                    if failures and allow_degraded_output
+                    else ("incomplete" if failures else "ok")
+                ),
+                "allow_degraded_output": allow_degraded_output,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "failure_count": len(failures),
                 "successful_unique_images": len(canonical_results),
                 "failures": failures,
             },
         )
-        if failures:
+        if failures and not allow_degraded_output:
             partial_csv = self.work_dir / "partial_results.csv"
             write_submission(results, partial_csv)
             failed_names = ", ".join(

@@ -196,6 +196,7 @@ def main() -> int:
     table_max_new_tokens = int(
         os.environ.get("PADDLEOCR_TABLE_MAX_NEW_TOKENS", "4096")
     )
+    print("[输出策略] 默认强制完成：识别坏块补空并记录降级", flush=True)
     print(
         "[本地模型] PaddleOCR-VL-1.6，GPU 单并行，"
         f"长图={max_pixels}px/{max_new_tokens}tok，"
@@ -227,6 +228,7 @@ def main() -> int:
         client,
         long_csv,
         max_workers=1,
+        allow_degraded_output=True,
     )
     检查输出行数(long_csv, 数据集.长图数量)
 
@@ -236,6 +238,7 @@ def main() -> int:
         client,
         table_csv,
         max_workers=1,
+        allow_degraded_output=True,
     )
     检查输出行数(table_csv, 数据集.图表数量)
 

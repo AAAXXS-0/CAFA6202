@@ -380,6 +380,7 @@ def main() -> int:
     table_max_tokens = int(
         os.environ.get("FIRERED_TABLE_MAX_NEW_TOKENS", "8192")
     )
+    print("[输出策略] 默认强制完成：识别坏块补空并记录降级", flush=True)
     print(
         "[FireRed] 单模型、单并行、顺序执行，"
         f"长图={long_max_pixels}px/{long_max_tokens}tok，"
@@ -424,6 +425,7 @@ def main() -> int:
                 client,
                 long_csv,
                 max_workers=1,
+                allow_degraded_output=True,
             )
             if not partial_mode:
                 检查输出行数(long_csv, 数据集.长图数量)
@@ -441,6 +443,7 @@ def main() -> int:
                 client,
                 table_csv,
                 max_workers=1,
+                allow_degraded_output=True,
             )
             if not partial_mode:
                 检查输出行数(table_csv, 数据集.图表数量)

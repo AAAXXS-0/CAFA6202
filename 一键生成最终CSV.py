@@ -312,6 +312,7 @@ def main() -> int:
         f"[API 并行] {workers} 个唯一图片任务；单张图片内部仍按顺序聚合",
         flush=True,
     )
+    print("[输出策略] 默认强制完成：识别坏块补空并记录降级，不阻断最终 CSV", flush=True)
     if os.environ.get("AFAC_DRY_RUN") == "1":
         print("[检查模式] 固定文件、模板、配置和工作目录均正常；不切图、不调用 API", flush=True)
         return 0
@@ -401,6 +402,7 @@ def main() -> int:
                 client,
                 long_csv,
                 max_workers=workers,
+                allow_degraded_output=True,
             )
             if not partial_mode:
                 检查输出行数(long_csv, 数据集.长图数量)
@@ -418,6 +420,7 @@ def main() -> int:
                 client,
                 table_csv,
                 max_workers=workers,
+                allow_degraded_output=True,
             )
             if not partial_mode:
                 检查输出行数(table_csv, 数据集.图表数量)

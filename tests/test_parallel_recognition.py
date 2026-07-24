@@ -43,7 +43,9 @@ class FailureTracker:
         self.lock = Lock()
         self.calls: list[str] = []
 
-    def __call__(self, manifest_path: Path, client: FakeClient) -> str:
+    def __call__(
+        self, manifest_path: Path, client: FakeClient, **kwargs
+    ) -> str:
         with self.lock:
             self.calls.append(manifest_path.stem)
         if manifest_path.stem == self.failed_stem:
@@ -194,6 +196,42 @@ class ParallelRecognitionTest(unittest.TestCase):
                         )
                     self.assertEqual(retry_tracker.calls, 1)
                     self.assertEqual(len(results), 8)
+
+    def test_forced_completion_outputs_all_rows_after_image_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self._manifest(root, count=3)
+            cases = [
+                LongPipeline(LongConfig(backend="pillow"), root / "long_forced"),
+                TablePipeline(
+                    TableConfig(backend="pillow", detector="projection"),
+                    root / "table_forced",
+                ),
+            ]
+            for pipeline in cases:
+                output = root / f"{pipeline.__class__.__name__}.csv"
+                tracker = FailureTracker("manifest_01")
+                with patch.object(
+                    pipeline,
+                    "_recognize_manifest",
+                    side_effect=tracker,
+                ):
+                    results = pipeline.recognize_dataset(
+                        manifest,
+                        FakeClient(),
+                        output,
+                        max_workers=1,
+                        allow_degraded_output=True,
+                    )
+                self.assertEqual(len(results), 3)
+                self.assertEqual(results["image_01.png"], "")
+                self.assertTrue(output.is_file())
+                report = json.loads(
+                    (pipeline.work_dir / "recognition_failures.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(report["status"], "degraded")
 
     def test_worker_count_must_be_positive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
