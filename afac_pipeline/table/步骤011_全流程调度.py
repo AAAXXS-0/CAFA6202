@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,59 @@ def _json_dump(path: Path, value: Any) -> None:
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _raw_attempt_number(path: Path) -> int:
+    """从原始响应名读取 attempt 数字，避免 attempt_10 排在 attempt_9 前面。"""
+
+    match = re.search(r"_attempt_(\d+)$", path.stem)
+    return int(match.group(1)) if match else -1
+
+
+def _raw_response_candidates(raw_dir: Path, tile_stem: str) -> list[Path]:
+    """按真实尝试次数从新到旧返回全部历史原始响应。"""
+
+    return sorted(
+        raw_dir.glob(f"{tile_stem}_attempt_*.md"),
+        key=_raw_attempt_number,
+        reverse=True,
+    )
+
+
+def _raw_metadata_matches(metadata: dict[str, Any], expected: dict[str, Any]) -> bool:
+    """只有图片、切块、模型和提示词签名全相同时才允许恢复。"""
+
+    keys = ("tile_sha256", "prompt_sha256", "cache_key", "model")
+    return all(metadata.get(key) == expected.get(key) for key in keys)
+
+
+def _is_truncated_empty_html(response: str) -> bool:
+    """判断响应是否只有空 HTML 单元格，且恰好在末尾标签中途截断。
+
+    这不是普通 HTML 自动修复：只要出现一个可见字符就返回 False，交回严格
+    质量闸门重试。连续复核后，上层仅按预处理 R×C 生成全空矩阵。
+    """
+
+    if len(re.findall(r"<table\b", response, re.IGNORECASE)) != 1:
+        return False
+    if re.search(r"</table\s*>", response, re.IGNORECASE):
+        return False
+    if not re.search(r"</t[dh]\s*>", response, re.IGNORECASE):
+        return False
+    remainder = re.sub(
+        r"</?(?:table|tr|td|th)\b[^>]*>",
+        "",
+        response,
+        flags=re.IGNORECASE,
+    )
+    # API 的 token 截断通常停在“<td”或“</tr”中间，只允许末尾这一段残标签。
+    remainder = re.sub(
+        r"</?(?:table|tr|td|th)?[^<>]*$",
+        "",
+        remainder,
+        flags=re.IGNORECASE,
+    )
+    return not remainder.strip()
 
 
 def _table_cache_model(client: FinixDocClient) -> str:
@@ -1633,6 +1687,11 @@ class TablePipeline:
                     "tile": tile.to_dict(),
                     "model": cache_model,
                     "prompt_version": PROMPT_VERSION,
+                    "tile_sha256": hashlib.sha256(image_bytes).hexdigest(),
+                    "prompt_sha256": hashlib.sha256(
+                        prompt.encode("utf-8")
+                    ).hexdigest(),
+                    "cache_key": cache_key,
                 }
                 ink_mask = tile_ink_masks.get(tile_id)
 
@@ -1745,6 +1804,60 @@ class TablePipeline:
                             break
 
                     if markdown is None:
+                        # 原始响应不等于缓存。只有旁边的元数据证明图片字节、
+                        # 模型和提示词完全一致时，才从新到旧逐个尝试恢复。
+                        raw_dir = response_dir / "模型原始"
+                        for raw_path in _raw_response_candidates(
+                            raw_dir, Path(tile.file_name).stem
+                        ):
+                            metadata_path = raw_path.with_suffix(".json")
+                            try:
+                                raw_metadata = _load_json(metadata_path)
+                                raw = raw_path.read_text(encoding="utf-8")
+                            except (OSError, json.JSONDecodeError):
+                                continue
+                            if not _raw_metadata_matches(raw_metadata, base_metadata):
+                                continue
+                            if raw_metadata.get("response_sha256") != hashlib.sha256(
+                                raw.encode("utf-8")
+                            ).hexdigest():
+                                continue
+                            if not raw.strip() or tile.tiling_mode != "logical_grid":
+                                continue
+                            try:
+                                recovered, recovered_quality = (
+                                    normalize_table_response_soft(
+                                        raw, *_logical_tile_shape(tile), ink_mask
+                                    )
+                                )
+                            except HtmlTableMergeError:
+                                continue
+                            if (
+                                _mask_has_any_text(ink_mask)
+                                and recovered_quality["nonempty_cells"] == 0
+                            ):
+                                continue
+                            markdown = recovered
+                            quality_report = recovered_quality
+                            source = "已校验的历史原始响应"
+                            self.cache.put_tile(
+                                cache_key,
+                                markdown,
+                                {
+                                    **base_metadata,
+                                    "response_status": "recovered",
+                                    "recovered_from": str(raw_path.resolve()),
+                                    "quality": quality_report,
+                                },
+                            )
+                            print(
+                                f"[图表恢复 {completed_tiles + 1:02d}/{total_tiles:02d}] "
+                                f"{request_label}：{source}",
+                                flush=True,
+                            )
+                            break
+
+                    if markdown is None:
                         print(
                             f"[图表识别 {completed_tiles + 1:02d}/{total_tiles:02d}] "
                             f"{request_label}：请求模型",
@@ -1785,6 +1898,17 @@ class TablePipeline:
                                 / f"{Path(tile.file_name).stem}_attempt_{attempt + 1}.md"
                             )
                             last_raw_path.write_text(raw, encoding="utf-8")
+                            _json_dump(
+                                last_raw_path.with_suffix(".json"),
+                                {
+                                    **base_metadata,
+                                    "attempt": attempt + 1,
+                                    "response_sha256": hashlib.sha256(
+                                        raw.encode("utf-8")
+                                    ).hexdigest(),
+                                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
 
                             if not raw.strip():
                                 empty_reason = "model-empty-markdown"
@@ -1813,7 +1937,11 @@ class TablePipeline:
                                     )
                                 )
                             except HtmlTableMergeError as error:
-                                last_error = error
+                                if _is_truncated_empty_html(raw):
+                                    empty_reason = "model-empty-truncated-html"
+                                    last_error = None
+                                else:
+                                    last_error = error
                                 if attempt < retry_limit:
                                     print(
                                         f"[图表内容异常复核 {attempt + 1}/{retry_limit}] "

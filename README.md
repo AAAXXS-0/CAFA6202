@@ -2,6 +2,13 @@
 
 本仓库按赛题已经分好的数据目录，分别处理长图文档和图表图片；不做自动路由。两个分支共享精确去重、图像读取、缓存、识别后端和提交文件生成，但检测、切块与后处理逻辑彼此独立。
 
+当前默认数据集为 B 榜：`raw_data/finix_huge_long_rest_B/images` 与
+`raw_data/finix_huge_table_rest_B/images` 各 50 张。一键脚本会自动优先选择
+B 榜；若需回看 A 榜，可设置 `AFAC_DATASET=A`。最终结果始终按
+`finix_ab_B_submit_mock.csv` 的 `file_name` 一对一合并，不依赖“前50行/后50行”
+或目录遍历顺序。B 榜原图中17个中文文件名存在乱码，程序只在可逆编码或
+赛事编号唯一匹配时改回官方名，任何多解都会停止生成 CSV。
+
 ## 项目结构
 
 ```text
@@ -40,6 +47,18 @@ python -m pip install -r requirements.txt
 ```
 
 超大图片建议安装系统 `libvips`，否则会自动使用 Pillow，功能不受影响但峰值内存更高。
+
+长图预处理还需要 360LayoutAnalysis 的 `general6-8n.pt`。权重目录已被
+`.gitignore` 排除，若本机文件被清理，请从 qihoo360 官方 Hugging Face 仓库
+恢复到固定位置：
+
+```bash
+mkdir -p 360LayoutAnalysis
+wget -O 360LayoutAnalysis/general6-8n.pt \
+  "https://huggingface.co/qihoo360/360LayoutAnalysis/resolve/main/general6-8n.pt?download=true"
+```
+
+一键脚本会在预处理前检查该文件，缺失时直接报错，不会悄悄换用其他模型。
 
 ## 4060 本地 FireRed-OCR-2B
 
@@ -100,7 +119,7 @@ AFAC_FIRERED_DRY_RUN=1 /usr/bin/python3 一键生成FireRed模型CSV.py
 ```text
 SQLite 缓存：work/FireRed正式运行/
 阶段 CSV：outputs/FireRed最终提交/长图结果.csv、图表结果.csv
-最终 CSV：outputs/FireRed最终提交/finix_ab_A_submit.csv
+最终 CSV：outputs/FireRed最终提交/finix_ab_B_submit.csv
 ```
 
 ## 推荐：4060 本地 PaddleOCR-VL
@@ -170,7 +189,7 @@ PADDLEOCR_TABLE_MAX_NEW_TOKENS=4096 \
 本地极端长图子块：对应 prepared 图片目录/local_vl_parts/
 阶段 CSV：outputs/本地模型最终提交/长图结果.csv
 阶段 CSV：outputs/本地模型最终提交/图表结果.csv
-最终 CSV：outputs/本地模型最终提交/finix_ab_A_submit.csv
+最终 CSV：outputs/本地模型最终提交/finix_ab_B_submit.csv
 ```
 
 手动中断后重新运行同一命令即可续跑。程序会跳过相同模型签名下已经成功的切块。
@@ -233,10 +252,10 @@ PADDLEOCR_TABLE_MAX_NEW_TOKENS=4096 \
 强制模式会复用当前配置目录里的不完整清单，只把 `items` 中已经成功预处理
 的图片交给 API；没有预处理缓存的图片直接跳过。输出保存在
 `outputs/最终提交/强制API部分结果/`，脚本不会生成或覆盖正式的
-`finix_ab_A_submit.csv`，因此部分结果不能直接提交。
+`finix_ab_B_submit.csv`，因此部分结果不能直接提交。
 
 完整预处理通过后，脚本会断点续跑官方 API、按模板合并 100 行结果，并输出到
-`outputs/最终提交/finix_ab_A_submit.csv`。官方协议严格只上传
+`outputs/最终提交/finix_ab_B_submit.csv`。官方协议严格只上传
 `userId/apiKey/fileName/file`，不发送自定义提示词。默认同时识别 6 张唯一图片，
 可用 `FINIXDOC_WORKERS=1～32` 调整；单张图片内部仍按原顺序聚合。每次请求默认超时
 600 秒，可用 `FINIXDOC_TIMEOUT` 覆盖；`FINIXDOC_MAX_RETRIES` 控制最多 15 次平方退避重试。
@@ -278,7 +297,7 @@ python3 -m pip install --target /tmp/afac_rapidocr -r requirements-local-ocr.txt
 PYTHONPATH=/tmp/afac_rapidocr python3 main.py run-local-all \
   --long-manifest work/long/dataset_manifest.json \
   --table-manifest work/tables/dataset_manifest.json \
-  --template finix_ab_A_submit_mock.csv \
+  --template finix_ab_B_submit_mock.csv \
   --work-dir work/local_ocr \
   --output-csv outputs/local_ocr_submission.csv
 ```
@@ -323,10 +342,10 @@ SHA-256 根据文件的全部字节生成摘要。摘要相同可以视为文件
 
 ```bash
 python main.py combine-submissions \
-  --template finix_ab_A_submit_mock.csv \
+  --template finix_ab_B_submit_mock.csv \
   --input-csv outputs/long_submission.csv \
   --input-csv outputs/table_submission.csv \
-  --output-csv outputs/finix_ab_A_submit.csv
+  --output-csv outputs/finix_ab_B_submit.csv
 ```
 
 合并时会拒绝重复、缺失、多余文件名和错误表头。

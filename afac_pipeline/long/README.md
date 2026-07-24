@@ -307,7 +307,7 @@ prepared/<文件名_哈希>/
 
 ```bash
 /usr/bin/python3 main.py prepare-long \
-  --input-dir "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images" \
+  --input-dir "raw_data/finix_huge_long_rest_B/images" \
   --work-dir work/long \
   --config afac_pipeline/long/config.example.json
 

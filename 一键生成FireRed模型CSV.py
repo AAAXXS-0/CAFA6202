@@ -17,13 +17,15 @@ import sys
 
 
 项目根目录 = Path(__file__).resolve().parent
+from afac_pipeline.common.竞赛数据集 import 解析竞赛数据集
+
+数据集 = 解析竞赛数据集(项目根目录, os.environ.get("AFAC_DATASET", "auto"))
 FireRed环境Python = Path("/home/zero/miniconda3/envs/AFAC_FIRERED/bin/python")
 系统Python = Path("/usr/bin/python3")
-长图输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images"
-图表输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_table_rest_A/images"
+长图输入目录 = 数据集.长图目录
+图表输入目录 = 数据集.图表目录
 长图配置文件 = 项目根目录 / "afac_pipeline/long/config.example.json"
 图表配置文件 = 项目根目录 / "afac_pipeline/table/config.example.json"
-官方提交模板 = 项目根目录 / "finix_ab_A_submit_mock.csv"
 准备工作根目录 = 项目根目录 / "work/正式运行"
 FireRed工作根目录 = 项目根目录 / "work/FireRed正式运行"
 输出目录 = 项目根目录 / "outputs/FireRed最终提交"
@@ -254,7 +256,7 @@ def main() -> int:
     import torch
 
     from afac_pipeline.common.firered_vl_client import FireRedOCRClient
-    from afac_pipeline.common.submission import combine_submissions
+    from afac_pipeline.common.submission import combine_submissions_in_order
     from afac_pipeline.long import LongConfig, LongPipeline
     from afac_pipeline.table import TableConfig, TablePipeline
 
@@ -263,7 +265,6 @@ def main() -> int:
         图表输入目录,
         长图配置文件,
         图表配置文件,
-        官方提交模板,
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -403,7 +404,7 @@ def main() -> int:
     table_csv = run_output_dir / (
         "图表部分结果.csv" if partial_mode else "图表结果.csv"
     )
-    final_csv = 输出目录 / "finix_ab_A_submit.csv"
+    final_csv = 输出目录 / 数据集.输出文件名
 
     print(f"[缓存签名] {client.model}", flush=True)
     print(f"[FireRed 缓存] 长图：{long_work / 'cache.sqlite3'}")
@@ -425,7 +426,7 @@ def main() -> int:
                 max_workers=1,
             )
             if not partial_mode:
-                检查输出行数(long_csv, 50)
+                检查输出行数(long_csv, 数据集.长图数量)
         except Exception as error:
             failures.append(f"长图识别失败：{error}")
             print(f"[FireRed 长图失败] {error}", flush=True)
@@ -442,7 +443,7 @@ def main() -> int:
                 max_workers=1,
             )
             if not partial_mode:
-                检查输出行数(table_csv, 50)
+                检查输出行数(table_csv, 数据集.图表数量)
         except Exception as error:
             failures.append(f"图表识别失败：{error}")
             print(f"[FireRed 图表失败] {error}", flush=True)
@@ -465,8 +466,13 @@ def main() -> int:
             print(f"- 图表部分结果：{table_csv}", flush=True)
         return 0
 
-    combine_submissions([long_csv, table_csv], 官方提交模板, final_csv)
-    检查输出行数(final_csv, 100)
+    combine_submissions_in_order(
+        [long_csv, table_csv],
+        数据集.提交顺序,
+        final_csv,
+        file_name_mapping=数据集.文件名映射,
+    )
+    检查输出行数(final_csv, len(数据集.提交顺序))
     print(f"\n[全部完成] FireRed 最终提交：{final_csv}", flush=True)
     return 0
 

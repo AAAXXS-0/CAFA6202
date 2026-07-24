@@ -103,7 +103,7 @@ flowchart TD
 
 ```bash
 python main.py prepare-tables \
-  --input-dir "raw_data/AFAC A榜评测数据集(2)/finix_huge_table_rest_A/images" \
+  --input-dir "raw_data/finix_huge_table_rest_B/images" \
   --work-dir work/tables \
   --config afac_pipeline/table/config.example.json
 ```

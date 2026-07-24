@@ -16,7 +16,11 @@ import sys
 
 from afac_pipeline.common.cache import merge_result_caches
 from afac_pipeline.common.hashing import discover_images
-from afac_pipeline.common.submission import combine_submissions
+from afac_pipeline.common.submission import (
+    combine_submissions,
+    combine_submissions_in_order,
+)
+from afac_pipeline.common.竞赛数据集 import 解析竞赛数据集
 from afac_pipeline.common.vlm_client import (
     FinixDocClient,
     MAX_RETRY_COUNT,
@@ -27,12 +31,13 @@ from afac_pipeline.table import TableConfig, TablePipeline
 
 
 项目根目录 = Path(__file__).resolve().parent
-长图输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_long_rest_A/images"
-图表输入目录 = 项目根目录 / "raw_data/AFAC A榜评测数据集(2)/finix_huge_table_rest_A/images"
+# 自动优先选择当前存在的 B 榜；可用 AFAC_DATASET=A 显式回看 A 榜。
+数据集 = 解析竞赛数据集(项目根目录, os.environ.get("AFAC_DATASET", "auto"))
+长图输入目录 = 数据集.长图目录
+图表输入目录 = 数据集.图表目录
 长图配置文件 = 项目根目录 / "afac_pipeline/long/config.example.json"
 图表配置文件 = 项目根目录 / "afac_pipeline/table/config.example.json"
 官方接口说明 = 项目根目录 / "FinixDoc_VL调用.txt"
-官方提交模板 = 项目根目录 / "finix_ab_A_submit_mock.csv"
 输出目录 = 项目根目录 / "outputs/最终提交"
 默认并行数 = 6
 最大并行数 = 32
@@ -63,7 +68,7 @@ def 解析参数() -> argparse.Namespace:
 
 
 def 检查固定文件() -> None:
-    """在耗时处理前检查输入、模型、凭据说明和模板是否齐全。"""
+    """在耗时处理前检查输入、模型与凭据，并核对图片名集合。"""
 
     required = [
         长图输入目录,
@@ -71,7 +76,6 @@ def 检查固定文件() -> None:
         长图配置文件,
         图表配置文件,
         官方接口说明,
-        官方提交模板,
         项目根目录 / "360LayoutAnalysis/general6-8n.pt",
     ]
     missing = [str(path) for path in required if not path.exists()]
@@ -80,20 +84,14 @@ def 检查固定文件() -> None:
 
     long_names = {path.name for path in discover_images(长图输入目录)}
     table_names = {path.name for path in discover_images(图表输入目录)}
-    with 官方提交模板.open("r", encoding="utf-8-sig", newline="") as file:
-        template_names = {row["file_name"] for row in csv.DictReader(file)}
     expected = long_names | table_names
-    if long_names & table_names:
-        raise RuntimeError("长图和图表目录存在同名图片，无法安全合并")
-    if expected != template_names:
-        raise RuntimeError(
-            "数据目录与官方模板文件名不一致："
-            f"模板缺少 {sorted(expected - template_names)}；"
-            f"模板多出 {sorted(template_names - expected)}"
-        )
+    if expected != set(数据集.文件名映射):
+        raise RuntimeError("运行时图片集合与启动时解析的数据集不一致")
+    order_source = 数据集.模板路径 or "按全部 B 榜图片名稳定排序"
     print(
-        f"[检查完成] 长图 {len(long_names)} 张，图表 {len(table_names)} 张，"
-        f"模板 {len(template_names)} 行",
+        f"[检查完成] {数据集.榜单} 榜：长图 {len(long_names)} 张，"
+        f"图表 {len(table_names)} 张，共 {len(expected)} 张；"
+        f"提交顺序来源：{order_source}",
         flush=True,
     )
 
@@ -386,7 +384,7 @@ def main() -> int:
     table_csv = run_output_dir / (
         "图表部分结果.csv" if partial_mode else "图表结果.csv"
     )
-    final_csv = 输出目录 / "finix_ab_A_submit.csv"
+    final_csv = 输出目录 / 数据集.输出文件名
 
     failures: list[str] = []
 
@@ -405,7 +403,7 @@ def main() -> int:
                 max_workers=workers,
             )
             if not partial_mode:
-                检查输出行数(long_csv, 50)
+                检查输出行数(long_csv, 数据集.长图数量)
         except Exception as error:  # 保留另一分支继续积累缓存
             failures.append(f"长图识别失败：{error}")
             print(f"[长图识别失败] {error}", flush=True)
@@ -422,7 +420,7 @@ def main() -> int:
                 max_workers=workers,
             )
             if not partial_mode:
-                检查输出行数(table_csv, 50)
+                检查输出行数(table_csv, 数据集.图表数量)
         except Exception as error:  # 保留长图已完成的缓存
             failures.append(f"图表识别失败：{error}")
             print(f"[图表识别失败] {error}", flush=True)
@@ -445,8 +443,13 @@ def main() -> int:
             print(f"- 图表部分结果：{table_csv}", flush=True)
         return 0
 
-    combine_submissions([long_csv, table_csv], 官方提交模板, final_csv)
-    检查输出行数(final_csv, 100)
+    combine_submissions_in_order(
+        [long_csv, table_csv],
+        数据集.提交顺序,
+        final_csv,
+        file_name_mapping=数据集.文件名映射,
+    )
+    检查输出行数(final_csv, len(数据集.提交顺序))
     print(f"\n[全部完成] 最终提交文件：{final_csv}", flush=True)
     return 0
 

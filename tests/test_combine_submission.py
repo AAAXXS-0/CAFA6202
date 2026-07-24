@@ -3,10 +3,30 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from afac_pipeline.common.submission import combine_submissions, write_submission
+from afac_pipeline.common.submission import (
+    combine_submissions,
+    combine_submissions_in_order,
+    write_submission,
+)
 
 
 class CombineSubmissionTest(unittest.TestCase):
+    def test_dataset_order_works_without_mock_template(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            long_csv = root / "long.csv"
+            table_csv = root / "table.csv"
+            write_submission({"long.jpg": "long"}, long_csv)
+            write_submission({"table.jpg": "table"}, table_csv)
+            output = combine_submissions_in_order(
+                [long_csv, table_csv],
+                ["table.jpg", "long.jpg"],
+                root / "final.csv",
+            )
+            with output.open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+        self.assertEqual([row["file_name"] for row in rows], ["table.jpg", "long.jpg"])
+
     def test_two_branches_are_written_in_template_order(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

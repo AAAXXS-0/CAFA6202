@@ -61,17 +61,25 @@ def _read_submission(path: str | Path) -> tuple[list[str], dict[str, str]]:
     return order, results
 
 
-def combine_submissions(
+def combine_submissions_in_order(
     input_paths: Iterable[str | Path],
-    template_path: str | Path,
+    file_order: Iterable[str],
     output_path: str | Path,
+    file_name_mapping: dict[str, str] | None = None,
 ) -> Path:
-    """按官方模板顺序合并多个分支 CSV，并严格校验 100 张图片集合。"""
+    """按图片名合并分支结果，并可把磁盘乱码名改回官方名。"""
 
-    template_order, _ = _read_submission(template_path)
+    template_order = list(file_order)
+    if len(template_order) != len(set(template_order)):
+        raise ValueError("提交顺序中存在重复 file_name")
     combined: dict[str, str] = {}
     for input_path in input_paths:
         _, branch_results = _read_submission(input_path)
+        if file_name_mapping is not None:
+            branch_results = {
+                file_name_mapping.get(name, name): value
+                for name, value in branch_results.items()
+            }
         duplicates = set(combined) & set(branch_results)
         if duplicates:
             raise ValueError(f"分支 CSV 之间存在重复 file_name：{sorted(duplicates)}")
@@ -88,3 +96,14 @@ def combine_submissions(
     output = Path(output_path)
     write_submission(combined, output, template_order)
     return output
+
+
+def combine_submissions(
+    input_paths: Iterable[str | Path],
+    template_path: str | Path,
+    output_path: str | Path,
+) -> Path:
+    """按官方模板顺序合并多个分支 CSV。"""
+
+    template_order, _ = _read_submission(template_path)
+    return combine_submissions_in_order(input_paths, template_order, output_path)

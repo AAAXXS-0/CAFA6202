@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape
 from html.parser import HTMLParser
 import re
@@ -37,6 +37,8 @@ class ParsedResponse:
     placements: list[Placement]
     row_count: int
     column_count: int
+    # 只记录不会改变任何可见文字的保守格式修复，最后随质量报告输出。
+    format_warnings: list[str] = field(default_factory=list)
 
 
 class _FirstTableParser(HTMLParser):
@@ -169,6 +171,43 @@ def parse_table_response(response: str) -> ParsedResponse:
     return _parse_html(response) or _parse_markdown(response)
 
 
+def _visible_text_signature(response: str) -> str:
+    """提取标签外的可见文字，用来证明自动修复没有改动识别内容。"""
+
+    without_tags = re.sub(r"<[^>]*>", "", response)
+    return re.sub(r"\s+", " ", without_tags).strip()
+
+
+def _repair_missing_final_table_end(response: str) -> str | None:
+    """只修复位于响应末尾、且仅缺 ``</table>`` 的单一 HTML 表。
+
+    模型真正被 token 截断时，常常还会缺 ``</td>`` 或 ``</tr>``。那种情况
+    无法证明最后一个单元格是否完整，必须继续判为损坏并重试，不能猜着补。
+    """
+
+    if len(re.findall(r"<table\b", response, re.IGNORECASE)) != 1:
+        return None
+    if re.search(r"</table\s*>", response, re.IGNORECASE):
+        return None
+    if len(re.findall(r"<tr\b", response, re.IGNORECASE)) != len(
+        re.findall(r"</tr\s*>", response, re.IGNORECASE)
+    ):
+        return None
+    for tag in ("td", "th"):
+        if len(re.findall(rf"<{tag}\b", response, re.IGNORECASE)) != len(
+            re.findall(rf"</{tag}\s*>", response, re.IGNORECASE)
+        ):
+            return None
+    last_row_end = list(re.finditer(r"</tr\s*>", response, re.IGNORECASE))
+    if not last_row_end or response[last_row_end[-1].end() :].strip():
+        return None
+
+    repaired = response.rstrip() + "\n</table>"
+    if _visible_text_signature(repaired) != _visible_text_signature(response):
+        return None
+    return repaired
+
+
 def _response_format_guard(response: str) -> None:
     """在宽松解析前拦截截断、多表重复和围栏循环。
 
@@ -196,7 +235,18 @@ def _response_format_guard(response: str) -> None:
 def parse_table_response_checked(response: str) -> ParsedResponse:
     """解析单个切片响应，并拒绝已知的损坏输出。"""
 
-    _response_format_guard(response)
+    try:
+        _response_format_guard(response)
+    except HtmlTableMergeError:
+        repaired = _repair_missing_final_table_end(response)
+        if repaired is None:
+            raise
+        _response_format_guard(repaired)
+        parsed = parse_table_response(repaired)
+        parsed.format_warnings.append(
+            "模型只遗漏了响应末尾的 </table>；已在不改变可见文字的前提下补全"
+        )
+        return parsed
     return parse_table_response(response)
 
 
@@ -294,6 +344,32 @@ def _remove_extra_simple_structure(
     warnings = []
     width = max((len(row) for row in rows), default=0)
     matrix = [[*row, *[Cell("") for _ in range(width - len(row))]] for row in rows]
+
+    # 常见两层表头会共用同一组列值，例如“保单年度 70…80”下一行是
+    # “年龄 70…80”。若预处理只得到一条表头行，不裁掉任何独有文字，
+    # 而是把两个左上角标签合进同一个物理格，完全相同的列值只保留一次。
+    if (
+        len(matrix) == expected_rows + 1
+        and width == expected_columns
+        and width >= 2
+        and matrix[0][0].text.strip()
+        and matrix[1][0].text.strip()
+        and matrix[0][0].text.strip() != matrix[1][0].text.strip()
+        and tuple(_cell_signature(cell) for cell in matrix[0][1:])
+        == tuple(_cell_signature(cell) for cell in matrix[1][1:])
+        and any(cell.text.strip() for cell in matrix[0][1:])
+    ):
+        first_label = matrix[0][0].text.strip()
+        second = matrix[1][0]
+        matrix[1][0] = Cell(
+            f"{first_label}\n{second.text.strip()}",
+            second.tag,
+        )
+        matrix.pop(0)
+        warnings.append(
+            "模型识别出共享列值的两层表头；已合并两个左上角标签，"
+            "没有丢弃任何不同文字"
+        )
 
     removed_empty_rows = 0
     while len(matrix) > expected_rows:
@@ -431,7 +507,7 @@ def _soft_align_parsed(
     """把模型内容放回预处理确定的固定物理矩阵。"""
 
     if parsed.row_count == expected_rows and parsed.column_count == expected_columns:
-        return parsed, []
+        return parsed, list(parsed.format_warnings)
 
     warning = (
         f"模型返回 {parsed.row_count}×{parsed.column_count}，"
@@ -467,7 +543,7 @@ def _soft_align_parsed(
             ParsedResponse(
                 parsed.prefix, parsed.suffix, clipped, expected_rows, expected_columns
             ),
-            [warning + detail],
+            [*parsed.format_warnings, warning + detail],
         )
 
     rows, cleanup_warnings = _remove_extra_simple_structure(
@@ -530,7 +606,11 @@ def _soft_align_parsed(
         ParsedResponse(
             parsed.prefix, parsed.suffix, aligned, expected_rows, expected_columns
         ),
-        [*cleanup_warnings, warning + "；已按单元格墨迹补齐空位"],
+        [
+            *parsed.format_warnings,
+            *cleanup_warnings,
+            warning + "；已按单元格墨迹补齐空位",
+        ],
     )
 
 

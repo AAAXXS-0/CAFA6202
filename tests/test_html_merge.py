@@ -95,6 +95,21 @@ class HtmlMergeTest(unittest.TestCase):
         self.assertEqual(report["physical_rows"], 2)
         self.assertTrue(report["warnings"])
 
+    def test_shared_values_in_two_level_header_are_merged_without_text_loss(self) -> None:
+        response = (
+            "<table>"
+            "<tr><th>保单年度</th><th>70</th><th>71</th></tr>"
+            "<tr><th>年龄</th><th>70</th><th>71</th></tr>"
+            "<tr><td>0</td><td>1</td><td>2</td></tr>"
+            "</table>"
+        )
+        html, report = normalize_table_response_soft(
+            response, 2, 3, [[True, True, True], [True, True, True]]
+        )
+        self.assertEqual(html.count("<tr>"), 2)
+        self.assertIn("保单年度<br>年龄", html)
+        self.assertTrue(any("两层表头" in item for item in report["warnings"]))
+
     def test_extra_nonempty_structure_is_rejected(self) -> None:
         response = (
             "<table><tr><td>A</td></tr><tr><td>B</td></tr><tr><td>C</td></tr></table>"
@@ -102,9 +117,24 @@ class HtmlMergeTest(unittest.TestCase):
         with self.assertRaisesRegex(HtmlTableMergeError, "非空结构超出"):
             normalize_table_response_soft(response, 2, 1, [[True], [True]])
 
-    def test_truncated_html_is_rejected_before_cache(self) -> None:
+    def test_only_missing_final_table_end_is_repaired_with_warning(self) -> None:
         response = "<table><tr><td>A</td></tr>"
+        html, report = normalize_table_response_soft(response, 1, 1, [[True]])
+        self.assertIn("<td>A</td>", html)
+        self.assertIn("</table>", html)
+        self.assertTrue(any("补全" in item for item in report["warnings"]))
+
+    def test_content_truncated_html_is_still_rejected_before_cache(self) -> None:
+        response = "<table><tr><td>A"
         with self.assertRaisesRegex(HtmlTableMergeError, "标签不闭合"):
+            normalize_table_response_soft(response, 1, 1, [[True]])
+
+    def test_multiple_tables_are_never_repaired(self) -> None:
+        response = (
+            "<table><tr><td>A</td></tr>"
+            "<table><tr><td>B</td></tr>"
+        )
+        with self.assertRaises(HtmlTableMergeError):
             normalize_table_response_soft(response, 1, 1, [[True]])
 
     def test_render_empty_table_preserves_preprocessed_shape(self) -> None:
